@@ -19,6 +19,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
+	"github.com/openai/openai-go/v3"
+
 	"wechat-robot-client/dto"
 	"wechat-robot-client/interface/plugin"
 	"wechat-robot-client/interface/settings"
@@ -26,15 +31,10 @@ import (
 	"wechat-robot-client/pkg/robot"
 	"wechat-robot-client/repository"
 	"wechat-robot-client/vars"
-
-	"github.com/go-resty/resty/v2"
-	"github.com/google/uuid"
-	"github.com/sashabaranov/go-openai"
 )
 
 type MessageService struct {
 	ctx            context.Context
-	settings       settings.Settings
 	msgRepo        *repository.Message
 	crmRepo        *repository.ChatRoomMember
 	sysmsgRepo     *repository.SystemMessage
@@ -53,11 +53,40 @@ func NewMessageService(ctx context.Context) *MessageService {
 	}
 }
 
+func buildMessageLogPreview(content string) string {
+	preview := strings.ReplaceAll(strings.TrimSpace(content), "\n", `\n`)
+	previewRunes := []rune(preview)
+	if len(previewRunes) > 80 {
+		return string(previewRunes[:80]) + "..."
+	}
+	return preview
+}
+
+func shouldLogPluginMatch(messagePlugin plugin.MessageHandler) bool {
+	return !slices.Contains(messagePlugin.GetLabels(), "chat")
+}
+
+func (s *MessageService) logPluginMatch(messagePlugin plugin.MessageHandler, msgCtx *plugin.MessageContext) {
+	if msgCtx == nil || msgCtx.Message == nil || !shouldLogPluginMatch(messagePlugin) {
+		return
+	}
+	log.Printf("[PluginMatch] plugin=%s labels=%v msg_id=%d from=%s sender=%s is_chat_room=%t app_msg_type=%d content=%q",
+		messagePlugin.GetName(),
+		messagePlugin.GetLabels(),
+		msgCtx.Message.MsgId,
+		msgCtx.Message.FromWxID,
+		msgCtx.Message.SenderWxID,
+		msgCtx.Message.IsChatRoom,
+		msgCtx.Message.AppMsgType,
+		buildMessageLogPreview(msgCtx.MessageContent),
+	)
+}
+
 // ProcessTextMessage 处理文本消息
-func (s *MessageService) ProcessTextMessage(message *model.Message) {
+func (s *MessageService) ProcessTextMessage(message *model.Message, msgSettings settings.Settings) {
 	msgCtx := &plugin.MessageContext{
 		Context:        s.ctx,
-		Settings:       s.settings,
+		Settings:       msgSettings,
 		Message:        message,
 		MessageContent: message.Content,
 		MessageService: s,
@@ -70,15 +99,16 @@ func (s *MessageService) ProcessTextMessage(message *model.Message) {
 		if !match {
 			continue
 		}
+		s.logPluginMatch(messagePlugin, msgCtx)
 		messagePlugin.Run(msgCtx)
 	}
 }
 
 // ProcessImageMessage 处理图片消息
-func (s *MessageService) ProcessImageMessage(message *model.Message) {
+func (s *MessageService) ProcessImageMessage(message *model.Message, msgSettings settings.Settings) {
 	msgCtx := &plugin.MessageContext{
 		Context:        s.ctx,
-		Settings:       s.settings,
+		Settings:       msgSettings,
 		Message:        message,
 		MessageContent: message.Content,
 		MessageService: s,
@@ -91,6 +121,7 @@ func (s *MessageService) ProcessImageMessage(message *model.Message) {
 		if !match {
 			continue
 		}
+		s.logPluginMatch(messagePlugin, msgCtx)
 		messagePlugin.Run(msgCtx)
 	}
 }
@@ -111,7 +142,7 @@ func (s *MessageService) ProcessEmojiMessage(message *model.Message) {
 }
 
 // ProcessReferMessage 处理引用消息
-func (s *MessageService) ProcessReferMessage(message *model.Message) {
+func (s *MessageService) ProcessReferMessage(message *model.Message, msgSettings settings.Settings) {
 	var xmlMessage robot.XmlMessage
 	err := vars.RobotRuntime.XmlDecoder(message.Content, &xmlMessage)
 	if err != nil {
@@ -134,7 +165,7 @@ func (s *MessageService) ProcessReferMessage(message *model.Message) {
 	}
 	msgCtx := &plugin.MessageContext{
 		Context:        s.ctx,
-		Settings:       s.settings,
+		Settings:       msgSettings,
 		Message:        message,
 		MessageContent: xmlMessage.AppMsg.Title,
 		ReferMessage:   referMessage,
@@ -148,14 +179,15 @@ func (s *MessageService) ProcessReferMessage(message *model.Message) {
 		if !match {
 			continue
 		}
+		s.logPluginMatch(messagePlugin, msgCtx)
 		messagePlugin.Run(msgCtx)
 	}
 }
 
-func (s *MessageService) ProcessRedEnvelopesMessage(message *model.Message) {
+func (s *MessageService) ProcessRedEnvelopesMessage(message *model.Message, msgSettings settings.Settings) {
 	msgCtx := &plugin.MessageContext{
 		Context:        s.ctx,
-		Settings:       s.settings,
+		Settings:       msgSettings,
 		Message:        message,
 		MessageContent: message.Content,
 		MessageService: s,
@@ -168,18 +200,19 @@ func (s *MessageService) ProcessRedEnvelopesMessage(message *model.Message) {
 		if !match {
 			continue
 		}
+		s.logPluginMatch(messagePlugin, msgCtx)
 		messagePlugin.Run(msgCtx)
 	}
 }
 
 // ProcessAppMessage 处理应用消息
-func (s *MessageService) ProcessAppMessage(message *model.Message) {
+func (s *MessageService) ProcessAppMessage(message *model.Message, msgSettings settings.Settings) {
 	if message.AppMsgType == model.AppMsgTypequote {
-		s.ProcessReferMessage(message)
+		s.ProcessReferMessage(message, msgSettings)
 		return
 	}
 	if message.AppMsgType == model.AppMsgTypeRedEnvelopes {
-		s.ProcessRedEnvelopesMessage(message)
+		s.ProcessRedEnvelopesMessage(message, msgSettings)
 		return
 	}
 	if message.AppMsgType == model.AppMsgTypeUrl {
@@ -302,10 +335,10 @@ func (s *MessageService) ProcessRecalledMessage(message *model.Message, msgXml r
 }
 
 // ProcessPatMessage 处理拍一拍消息
-func (s *MessageService) ProcessPatMessage(message *model.Message, msgXml robot.SystemMessage) {
+func (s *MessageService) ProcessPatMessage(message *model.Message, msgXml robot.SystemMessage, msgSettings settings.Settings) {
 	msgCtx := &plugin.MessageContext{
 		Context:        s.ctx,
-		Settings:       s.settings,
+		Settings:       msgSettings,
 		Message:        message,
 		MessageContent: message.Content,
 		Pat:            message.IsChatRoom && msgXml.Pat.PattedUsername == vars.RobotRuntime.WxID,
@@ -317,6 +350,7 @@ func (s *MessageService) ProcessPatMessage(message *model.Message, msgXml robot.
 			if !match {
 				continue
 			}
+			s.logPluginMatch(messagePlugin, msgCtx)
 			messagePlugin.Run(msgCtx)
 		}
 	}
@@ -410,7 +444,7 @@ func (s *MessageService) ProcessNewChatRoomMemberMessage(message *model.Message,
 }
 
 // ProcessSystemMessage 处理系统消息
-func (s *MessageService) ProcessSystemMessage(message *model.Message) {
+func (s *MessageService) ProcessSystemMessage(message *model.Message, msgSettings settings.Settings) {
 	var msgXml robot.SystemMessage
 	err := vars.RobotRuntime.XmlDecoder(message.Content, &msgXml)
 	if err != nil {
@@ -421,7 +455,7 @@ func (s *MessageService) ProcessSystemMessage(message *model.Message) {
 		return
 	}
 	if msgXml.Type == "pat" {
-		s.ProcessPatMessage(message, msgXml)
+		s.ProcessPatMessage(message, msgXml, msgSettings)
 		return
 	}
 	if msgXml.Type == "sysmsgtemplate" &&
@@ -483,16 +517,14 @@ func (s *MessageService) ProcessMessageShouldInsertToDB(message *model.Message) 
 		return false
 	}
 	if message.Type == model.MsgTypeApp {
-		subTypeStr := vars.RobotRuntime.XmlFastDecoder(message.Content, "type")
-		if subTypeStr != "" {
-			subType, err := strconv.Atoi(subTypeStr)
-			if err == nil {
-				message.AppMsgType = model.AppMessageType(subType)
-				if message.AppMsgType == model.AppMsgTypeAttachUploading {
-					// 如果是上传中的应用消息，则不入库
-					return false
-				}
-			}
+		var xmlmsg robot.XmlMessage
+		if err := vars.RobotRuntime.XmlDecoder(message.Content, &xmlmsg); err != nil {
+			return true
+		}
+		message.AppMsgType = model.AppMessageType(xmlmsg.AppMsg.Type)
+		if message.AppMsgType == model.AppMsgTypeAttachUploading {
+			// 如果是上传中的应用消息，则不入库
+			return false
 		}
 	}
 	return true
@@ -502,9 +534,13 @@ func (s *MessageService) ProcessMessageShouldInsertToDB(message *model.Message) 
 func (s *MessageService) ProcessMentionedMeMessage(message *model.Message, msgSource string) {
 	self := vars.RobotRuntime.WxID
 	// 是否艾特我的消息
-	ats := vars.RobotRuntime.XmlFastDecoder(msgSource, "atuserlist")
-	if ats != "" {
-		atMembers := strings.Split(ats, ",")
+	var msgsource robot.MessageSource
+	err := vars.RobotRuntime.XmlDecoder(message.MessageSource, &msgsource)
+	if err != nil {
+		return
+	}
+	if msgsource.AtUserList != "" {
+		atMembers := strings.Split(msgsource.AtUserList, ",")
 		for _, at := range atMembers {
 			if strings.Trim(at, " ") == self {
 				message.IsAtMe = true
@@ -530,6 +566,7 @@ func (s *MessageService) InitSettingsByMessage(message *model.Message) (settings
 
 func (s *MessageService) ProcessMessage(syncResp robot.SyncMessage) {
 	for _, message := range syncResp.AddMsgs {
+		now := time.Now().Unix()
 		m := model.Message{
 			MsgId:              message.NewMsgId,
 			ClientMsgId:        message.MsgId,
@@ -540,7 +577,7 @@ func (s *MessageService) ProcessMessage(syncResp robot.SyncMessage) {
 			FromWxID:           *message.FromUserName.String,
 			ToWxID:             *message.ToUserName.String,
 			CreatedAt:          message.CreateTime,
-			UpdatedAt:          time.Now().Unix(),
+			UpdatedAt:          now,
 		}
 		s.ProcessMessageSender(&m)
 		if !s.ProcessMessageShouldInsertToDB(&m) {
@@ -551,17 +588,23 @@ func (s *MessageService) ProcessMessage(syncResp robot.SyncMessage) {
 		if settings == nil {
 			continue
 		}
-		s.settings = settings
 		err := s.msgRepo.Create(&m)
 		if err != nil {
 			log.Printf("入库消息失败: %v", err)
 			continue
 		}
+		if m.Type == model.MsgTypeText && vars.MemoryService != nil {
+			go vars.MemoryService.NotifyMessage(context.Background(), &m)
+		}
+		if message.CreateTime < now-600 {
+			// 消息太旧了，不处理了
+			continue
+		}
 		switch m.Type {
 		case model.MsgTypeText:
-			go s.ProcessTextMessage(&m)
+			go s.ProcessTextMessage(&m, settings)
 		case model.MsgTypeImage:
-			go s.ProcessImageMessage(&m)
+			go s.ProcessImageMessage(&m, settings)
 		case model.MsgTypeVoice:
 			go s.ProcessVoiceMessage(&m)
 		case model.MsgTypeVideo:
@@ -569,14 +612,14 @@ func (s *MessageService) ProcessMessage(syncResp robot.SyncMessage) {
 		case model.MsgTypeEmoticon:
 			go s.ProcessEmojiMessage(&m)
 		case model.MsgTypeApp:
-			go s.ProcessAppMessage(&m)
+			go s.ProcessAppMessage(&m, settings)
 		case model.MsgTypeShareCard:
 			go s.ProcessShareCardMessage(&m)
 		case model.MsgTypeVerify:
 			// 好友添加请求通知消息
 			go s.ProcessFriendVerifyMessage(&m)
 		case model.MsgTypeSystem:
-			go s.ProcessSystemMessage(&m)
+			go s.ProcessSystemMessage(&m, settings)
 		case model.MsgTypeLocation:
 			go s.ProcessLocationMessage(&m)
 		case model.MsgTypePrompt:
@@ -807,8 +850,8 @@ func (s *MessageService) ToolsCompleted(toWxID, replyWxID string) error {
 	return s.msgRepo.Create(&m)
 }
 
-// MsgSendGroupMassMsgText 文本消息群发接口
-func (s *MessageService) MsgSendGroupMassMsgText(toWxID []string, content string) error {
+// SendGroupMassMsgText 文本消息群发接口
+func (s *MessageService) SendGroupMassMsgText(toWxID []string, content string) error {
 	_, err := vars.RobotRuntime.MsgSendGroupMassMsgText(robot.MsgSendGroupMassMsgTextRequest{
 		ToWxid:  toWxID,
 		Content: content,
@@ -1255,6 +1298,12 @@ func (s *MessageService) SendVideoMessageByRemoteURL(toWxID string, videoURL str
 			}
 		}
 
+		if contentLength > maxFileSize {
+			resp.RawBody().Close()
+			tempFile.Close()
+			return fmt.Errorf("视频大小 %dMB 超过限制 %dMB，取消下载", contentLength/(1024*1024), maxFileSize/(1024*1024))
+		}
+
 		// 写入第一个分片
 		_, err = io.Copy(tempFile, resp.RawBody())
 		resp.RawBody().Close()
@@ -1295,11 +1344,20 @@ func (s *MessageService) SendVideoMessageByRemoteURL(toWxID string, videoURL str
 		}
 	} else if resp.StatusCode() == 200 {
 		log.Println("服务器不支持 Range 请求，使用普通下载方式")
-		_, err = io.Copy(tempFile, resp.RawBody())
+		if contentLen := resp.RawResponse.ContentLength; contentLen > maxFileSize {
+			resp.RawBody().Close()
+			tempFile.Close()
+			return fmt.Errorf("视频大小 %dMB 超过限制 %dMB，取消下载", contentLen/(1024*1024), maxFileSize/(1024*1024))
+		}
+		n, err := io.Copy(tempFile, io.LimitReader(resp.RawBody(), maxFileSize+1))
 		resp.RawBody().Close()
 		if err != nil {
 			tempFile.Close()
 			return fmt.Errorf("写入视频数据失败: %w", err)
+		}
+		if n > maxFileSize {
+			tempFile.Close()
+			return fmt.Errorf("视频大小超过限制 %dMB，取消下载", maxFileSize/(1024*1024))
 		}
 	} else {
 		resp.RawBody().Close()
@@ -1942,140 +2000,213 @@ func (s *MessageService) SendCDNVideo(toWxID string, content string) error {
 	return nil
 }
 
-func (s *MessageService) ProcessAIMessageContext(messages []*model.Message) []openai.ChatCompletionMessage {
-	var aiMessages []openai.ChatCompletionMessage
+func (s *MessageService) aiTextMessage(isAssistant bool, content string) openai.ChatCompletionMessageParamUnion {
+	if isAssistant {
+		return openai.AssistantMessage(content)
+	}
+	return openai.UserMessage(content)
+}
+
+func (s *MessageService) aiTextPartMessage(isAssistant bool, texts ...string) openai.ChatCompletionMessageParamUnion {
+	if isAssistant {
+		parts := make([]openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion, 0, len(texts))
+		for _, text := range texts {
+			parts = append(parts, openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{
+				OfText: &openai.ChatCompletionContentPartTextParam{Text: text},
+			})
+		}
+		return openai.AssistantMessage(parts)
+	}
+
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(texts))
+	for _, text := range texts {
+		parts = append(parts, openai.TextContentPart(text))
+	}
+	return openai.UserMessage(parts)
+}
+
+func (s *MessageService) buildQuoteAIMessage(msg *model.Message, isAssistant bool) (openai.ChatCompletionMessageParamUnion, bool) {
+	var xmlMessage robot.XmlMessage
+	if err := vars.RobotRuntime.XmlDecoder(msg.Content, &xmlMessage); err != nil {
+		return openai.ChatCompletionMessageParamUnion{}, false
+	}
+
+	switch xmlMessage.AppMsg.ReferMsg.Type {
+	case int(model.MsgTypeText):
+		return s.aiTextPartMessage(isAssistant, xmlMessage.AppMsg.ReferMsg.Content, xmlMessage.AppMsg.Title), true
+	case int(model.MsgTypeImage):
+		referMsg, ok := s.getReferMessageByMsgID(xmlMessage.AppMsg.ReferMsg.SvrID)
+		if !ok {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		return s.aiTextPartMessage(isAssistant, xmlMessage.AppMsg.Title+"\n\n 图片地址: "+referMsg.AttachmentUrl), true
+	case int(model.MsgTypeVoice):
+		referMsg, ok := s.getReferMessageByMsgID(xmlMessage.AppMsg.ReferMsg.SvrID)
+		if !ok {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		return s.aiTextPartMessage(isAssistant, xmlMessage.AppMsg.Title+"\n\n 语音地址: "+referMsg.AttachmentUrl), true
+	case int(model.MsgTypeVideo):
+		referMsg, ok := s.getReferMessageByMsgID(xmlMessage.AppMsg.ReferMsg.SvrID)
+		if !ok {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		return s.aiTextMessage(isAssistant, "视频地址: "+referMsg.AttachmentUrl+"\n\n"+xmlMessage.AppMsg.Title), true
+	case int(model.MsgTypeEmoticon):
+		if strings.TrimSpace(xmlMessage.AppMsg.Title) == "" {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		referMsg, ok := s.getReferMessageByMsgID(xmlMessage.AppMsg.ReferMsg.SvrID)
+		if !ok {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		return s.aiTextPartMessage(isAssistant, xmlMessage.AppMsg.Title+"\n\n 图片地址: "+referMsg.AttachmentUrl), true
+	case int(model.MsgTypeApp):
+		referMsg, ok := s.getReferMessageByMsgID(xmlMessage.AppMsg.ReferMsg.SvrID)
+		if !ok {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		switch referMsg.AppMsgType {
+		case model.AppMsgTypeEmoji:
+			if strings.TrimSpace(xmlMessage.AppMsg.Title) == "" {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			return s.aiTextPartMessage(isAssistant, xmlMessage.AppMsg.Title+"\n\n 图片地址: "+referMsg.AttachmentUrl), true
+		case model.AppMsgTypeChatHistory:
+			if strings.TrimSpace(xmlMessage.AppMsg.Title) == "" {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			var historyMessage robot.ChatHistoryMessage
+			var messageRecords []robot.ChatHistoryMessageRecord
+			if err := vars.RobotRuntime.XmlDecoder(referMsg.Content, &historyMessage); err != nil {
+				log.Println("引用消息解析失败")
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			recordInfo, err := historyMessage.AppMsg.RecordItem.ParseRecordInfo()
+			if err != nil {
+				log.Println("聊天记录解析失败")
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			if recordInfo == nil || len(recordInfo.DataList.Items) == 0 {
+				log.Println("聊天记录内容为空")
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+
+			messageRecords = robot.ExtractChatHistoryMessageRecords(recordInfo)
+			if len(messageRecords) == 0 {
+				log.Println("聊天记录内容为空")
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+
+			var sb strings.Builder
+			for _, messageRecord := range messageRecords {
+				sb.WriteString(messageRecord.Content)
+				sb.WriteString("\n\n")
+			}
+
+			return s.aiTextPartMessage(isAssistant, sb.String()+xmlMessage.AppMsg.Title), true
+		case model.AppMsgTypeAttach:
+			if strings.TrimSpace(xmlMessage.AppMsg.Title) == "" {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			return s.aiTextMessage(isAssistant, "文件地址: "+referMsg.AttachmentUrl+"\n\n"+xmlMessage.AppMsg.Title), true
+		case model.AppMsgTypeUrl:
+			if strings.TrimSpace(xmlMessage.AppMsg.Title) == "" {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			var refXmlMessage robot.XmlMessage
+			if err := vars.RobotRuntime.XmlDecoder(referMsg.Content, &refXmlMessage); err != nil {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			if refXmlMessage.AppMsg.URL == "" {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			return s.aiTextMessage(isAssistant, fmt.Sprintf(
+				"文章标题: %s\n\n文章摘要: %s\n\n文章地址: %s\n\n%s",
+				refXmlMessage.AppMsg.Title,
+				refXmlMessage.AppMsg.Des,
+				strings.ReplaceAll(refXmlMessage.AppMsg.URL, "&amp;", "&"),
+				xmlMessage.AppMsg.Title,
+			)), true
+		case model.AppMsgTypequote:
+			subRefMsg, err := s.msgRepo.GetByID(referMsg.ID)
+			if err != nil || subRefMsg == nil {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+
+			var subXmlMessage robot.XmlMessage
+			if err := vars.RobotRuntime.XmlDecoder(subRefMsg.Content, &subXmlMessage); err != nil {
+				return openai.ChatCompletionMessageParamUnion{}, false
+			}
+			return s.aiTextPartMessage(isAssistant, subXmlMessage.AppMsg.Title, xmlMessage.AppMsg.Title), true
+		}
+	}
+
+	return openai.ChatCompletionMessageParamUnion{}, false
+}
+
+func (s *MessageService) getReferMessageByMsgID(referMsgIDStr string) (*model.Message, bool) {
+	referMsgID, err := strconv.ParseInt(referMsgIDStr, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	referMsg, err := s.msgRepo.GetByMsgID(referMsgID)
+	if err != nil || referMsg == nil {
+		return nil, false
+	}
+	return referMsg, true
+}
+
+func (s *MessageService) getReferMessageByID(referMsgIDStr string) (*model.Message, bool) {
+	referMsgID, err := strconv.ParseInt(referMsgIDStr, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	referMsg, err := s.msgRepo.GetByID(referMsgID)
+	if err != nil || referMsg == nil {
+		return nil, false
+	}
+	return referMsg, true
+}
+
+func (s *MessageService) buildAIMessageContextMessage(msg *model.Message) (openai.ChatCompletionMessageParamUnion, bool) {
+	isAssistant := msg.SenderWxID == vars.RobotRuntime.WxID
+
+	switch {
+	case msg.Type == model.MsgTypeText:
+		if strings.TrimSpace(msg.Content) == "" {
+			return openai.ChatCompletionMessageParamUnion{}, false
+		}
+		return s.aiTextMessage(isAssistant, msg.Content), true
+	case msg.Type == model.MsgTypeImage && msg.AttachmentUrl != "":
+		return s.aiTextPartMessage(isAssistant, "图片地址: "+msg.AttachmentUrl), true
+	case msg.Type == model.MsgTypeVideo && msg.AttachmentUrl != "":
+		return s.aiTextMessage(isAssistant, "视频地址: "+msg.AttachmentUrl), true
+	case msg.Type == model.MsgTypeApp && msg.AppMsgType == model.AppMsgTypequote:
+		return s.buildQuoteAIMessage(msg, isAssistant)
+	default:
+		return openai.ChatCompletionMessageParamUnion{}, false
+	}
+}
+
+func (s *MessageService) ProcessAIMessageContext(messages []*model.Message) []openai.ChatCompletionMessageParamUnion {
+	aiMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	messageCtxMap := make(map[int64]bool)
 
 	for _, msg := range messages {
-		aiMessage := openai.ChatCompletionMessage{}
-		if msg.SenderWxID == vars.RobotRuntime.WxID {
-			aiMessage.Role = openai.ChatMessageRoleAssistant
-		} else {
-			aiMessage.Role = openai.ChatMessageRoleUser
-		}
-		if msg.Type == model.MsgTypeText {
-			aiMessage.Content = msg.Content
-		}
-		if msg.Type == model.MsgTypeImage && msg.AttachmentUrl != "" {
-			aiMessage.MultiContent = []openai.ChatMessagePart{
-				{
-					Type: openai.ChatMessagePartTypeImageURL,
-					ImageURL: &openai.ChatMessageImageURL{
-						URL: msg.AttachmentUrl,
-					},
-				},
-				{
-					Type: openai.ChatMessagePartTypeText,
-					Text: "图片地址: " + msg.AttachmentUrl,
-				},
-			}
-		}
-		if msg.Type == model.MsgTypeApp && msg.AppMsgType == model.AppMsgTypequote {
-			var xmlMessage robot.XmlMessage
-			err := vars.RobotRuntime.XmlDecoder(msg.Content, &xmlMessage)
-			if err != nil {
-				continue
-			}
-			// 引用的是文本消息，将引用的消息内容添加到上下文
-			if xmlMessage.AppMsg.ReferMsg.Type == int(model.MsgTypeText) {
-				aiMessage.MultiContent = []openai.ChatMessagePart{
-					{
-						Type: openai.ChatMessagePartTypeText,
-						Text: xmlMessage.AppMsg.ReferMsg.Content,
-					},
-					{
-						Type: openai.ChatMessagePartTypeText,
-						Text: xmlMessage.AppMsg.Title,
-					},
-				}
-			}
-			if xmlMessage.AppMsg.ReferMsg.Type == int(model.MsgTypeImage) {
-				referMsgIDStr := xmlMessage.AppMsg.ReferMsg.SvrID
-				// 字符串转int64
-				referMsgID, err := strconv.ParseInt(referMsgIDStr, 10, 64)
-				if err != nil {
-					continue
-				}
-				refreMsg, err := s.msgRepo.GetByMsgID(referMsgID)
-				if err != nil {
-					continue
-				}
-				if refreMsg == nil {
-					continue
-				}
-				aiMessage.MultiContent = []openai.ChatMessagePart{
-					{
-						Type: openai.ChatMessagePartTypeImageURL,
-						ImageURL: &openai.ChatMessageImageURL{
-							URL: refreMsg.AttachmentUrl,
-						},
-					},
-					{
-						Type: openai.ChatMessagePartTypeText,
-						Text: xmlMessage.AppMsg.Title + "\n\n 图片地址: " + refreMsg.AttachmentUrl,
-					},
-				}
-			}
-			if xmlMessage.AppMsg.ReferMsg.Type == int(model.AppMsgTypequote) {
-				referMsgIDStr := xmlMessage.AppMsg.ReferMsg.SvrID
-				// 字符串转int64
-				referMsgID, err := strconv.ParseInt(referMsgIDStr, 10, 64)
-				if err != nil {
-					continue
-				}
-				refreMsg, err := s.msgRepo.GetByID(referMsgID)
-				if err != nil {
-					continue
-				}
-				if refreMsg == nil {
-					continue
-				}
-				var subXmlMessage robot.XmlMessage
-				err = vars.RobotRuntime.XmlDecoder(refreMsg.Content, &subXmlMessage)
-				if err != nil {
-					continue
-				}
-				aiMessage.MultiContent = []openai.ChatMessagePart{
-					{
-						Type: openai.ChatMessagePartTypeText,
-						Text: subXmlMessage.AppMsg.Title,
-					},
-					{
-						Type: openai.ChatMessagePartTypeText,
-						Text: xmlMessage.AppMsg.Title,
-					},
-				}
-			}
-			// 图片表情包 jpg
-			if xmlMessage.AppMsg.ReferMsg.Type == int(model.MsgTypeEmoticon) {
-				aiMessage.Content = xmlMessage.AppMsg.Title
-			}
-			if xmlMessage.AppMsg.ReferMsg.Type == int(model.MsgTypeApp) {
-				referMsgIDStr := xmlMessage.AppMsg.ReferMsg.SvrID
-				// 字符串转int64
-				referMsgID, err := strconv.ParseInt(referMsgIDStr, 10, 64)
-				if err != nil {
-					continue
-				}
-				refreMsg, err := s.msgRepo.GetByMsgID(referMsgID)
-				if err != nil {
-					continue
-				}
-				if refreMsg == nil {
-					continue
-				}
-				// 动态表情包 gif
-				if refreMsg.AppMsgType == model.AppMsgTypeEmoji {
-					aiMessage.Content = xmlMessage.AppMsg.Title
-				}
-			}
-		}
-		if strings.TrimSpace(aiMessage.Content) == "" && len(aiMessage.MultiContent) == 0 {
+		if messageCtxMap[msg.MsgId] {
 			continue
 		}
+
+		aiMessage, ok := s.buildAIMessageContextMessage(msg)
+		if !ok {
+			continue
+		}
+
 		messageCtxMap[msg.MsgId] = true
 		aiMessages = append(aiMessages, aiMessage)
 	}
+
 	return aiMessages
 }
 
@@ -2083,7 +2214,7 @@ func (s *MessageService) SetMessageIsInContext(message *model.Message) error {
 	return s.msgRepo.SetMessageIsInContext(message)
 }
 
-func (s *MessageService) GetFriendAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessage, error) {
+func (s *MessageService) GetFriendAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	messages, err := s.msgRepo.GetFriendAIMessageContext(message)
 	if err != nil {
 		return nil, err
@@ -2100,7 +2231,7 @@ func (s *MessageService) ResetFriendAIMessageContext(message *model.Message) err
 	return s.msgRepo.ResetFriendAIMessageContext(message)
 }
 
-func (s *MessageService) GetChatRoomAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessage, error) {
+func (s *MessageService) GetChatRoomAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	messages, err := s.msgRepo.GetChatRoomAIMessageContext(message)
 	if err != nil {
 		return nil, err
@@ -2121,7 +2252,7 @@ func (s *MessageService) ResetChatRoomAIMessageContext(message *model.Message) e
 	return s.msgRepo.ResetChatRoomAIMessageContext(message)
 }
 
-func (s *MessageService) GetAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessage, error) {
+func (s *MessageService) GetAIMessageContext(message *model.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	if message.IsChatRoom {
 		return s.GetChatRoomAIMessageContext(message)
 	}

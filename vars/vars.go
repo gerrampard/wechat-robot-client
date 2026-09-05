@@ -35,19 +35,18 @@ var RobotStartTimeout time.Duration
 // 机器人运行时实例
 var RobotRuntime = &robot.Robot{}
 
-var MCPService ai.MCPService
+var MaxToolsIterations = 25
+var Agent ai.AgentService
 
 var SkillsDir string
-var SkillService ai.SkillService
 
 // Qdrant 客户端
 var QdrantClient *qdrantx.QdrantClient
 
-// RAG & 记忆相关服务
-var MemoryService ai.MemoryService
-var RAGService ai.RAGService
+// RAG
 var KnowledgeService ai.KnowledgeService
 var ImageKnowledgeService ai.ImageKnowledgeService
+var MemoryService ai.MemoryService
 
 var Webhook struct {
 	URL     string
@@ -60,6 +59,8 @@ var CronManager CronManagerInterface
 // 歌曲搜索Api
 var MusicSearchApi = "https://api.cenguigui.cn/api/music/netease/WyY_Dg.php"
 
+var SliderAccessKey string
+
 var ThirdPartyApiKey string
 
 var WordCloudUrl string
@@ -67,8 +68,10 @@ var WordCloudUrl string
 // Pprof 代理目标地址
 var PprofProxyURL string
 
-var UploadImageChunkSize int64 = 50000
-var UploadFileChunkSize int64 = 50000
+var AIEnded = "ended"
+
+var UploadImageChunkSize int64 = 200 * 1000 // 200KB
+var UploadFileChunkSize int64 = 200 * 1000  // 200KB
 
 var AtAllRegexp = `@所有人(?: | )`
 

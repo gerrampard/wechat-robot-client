@@ -100,12 +100,6 @@ func (m *CronManager) Start() {
 			// 每月群聊排行榜
 			chatRoomRankingMonthCron := NewChatRoomRankingMonthCron(m)
 			chatRoomRankingMonthCron.Register()
-			// 记忆维护
-			memoryMaintenanceCron := NewMemoryMaintenanceCron(m)
-			memoryMaintenanceCron.Register()
-			// 群聊知识提取
-			groupChatKnowledgeCron := NewGroupChatKnowledgeCron(m)
-			groupChatKnowledgeCron.Register()
 		}
 	}
 }

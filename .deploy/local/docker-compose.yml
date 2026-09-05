@@ -1,6 +1,6 @@
 services:
   wechat-admin-redis:
-    image: "${REGISTRY:-docker.io}/redis:latest"
+    image: registry.cn-shenzhen.aliyuncs.com/houhou/redis:latest
     container_name: wechat-admin-redis
     restart: always
     networks:
@@ -20,7 +20,7 @@ services:
       start_period: 10s
 
   wechat-admin-mysql:
-    image: "${REGISTRY:-docker.io}/mysql:8.2.0"
+    image: registry.cn-shenzhen.aliyuncs.com/houhou/mysql:8.2.0
     restart: always
     container_name: wechat-admin-mysql
     networks:
@@ -42,7 +42,7 @@ services:
       start_period: 120s
 
   wechat-admin-qdrant:
-    image: qdrant/qdrant:latest
+    image: registry.cn-shenzhen.aliyuncs.com/houhou/qdrant:latest
     restart: always
     container_name: wechat-admin-qdrant
     networks:
@@ -51,7 +51,7 @@ services:
       - "6333:6333"   # REST API
       - "6334:6334"   # gRPC
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - wechat_admin_qdrant_data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
       - QDRANT__SERVICE__API_KEY=x1234567890 # 自行修改，向量库的 API 密钥
@@ -158,6 +158,7 @@ services:
       - ENABLE_FLAC=true
       - SELECT_MAX_BR=true
       - FOLLOW_SOURCE_ORDER=true
+      - MUSIC_U=xxxxxxxx # 自行修改，网易云账号的 MUSIC_U cookie 值，部署完成后，访问 http://localhost:3000/qrlogin.html 登录后，从浏览器控制台获取
     ports:
       - "3000:3000"
     networks:
@@ -188,6 +189,7 @@ services:
       GIN_MODE: release
       TZ: Asia/Shanghai
       DOCKER_NETWORK: wechat-robot
+      ROBOT_SECRET_KEY: ys7Yn105ZfPVasQBG/NDoEDf2KwOsp9tx8UHfnQPkNE= # 可自行修改，不得少于 32 位，建议使用 openssl rand -base64 32 重新生成一个
       SESSION_SECRET: sessionid_123456 # 可自行修改 随便设置个uuid即可
       OPENAI_API_KEY: sk-123456 # 自行修改
       LOGIN_METHOD: token
@@ -245,3 +247,6 @@ services:
 networks:
   wechat-robot:
     external: true
+
+volumes:
+  wechat_admin_qdrant_data:

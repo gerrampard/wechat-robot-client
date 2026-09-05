@@ -1,11 +1,23 @@
 package skills
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/shlex"
+	"github.com/openai/openai-go/v3"
+
+	"wechat-robot-client/pkg/robotctx"
+	"wechat-robot-client/pkg/utils"
 )
 
 // SkillRepository 数据库持久化接口（由 repository 层实现）
@@ -28,8 +40,8 @@ type SkillRecord struct {
 	InstalledAt time.Time   `json:"installed_at"`
 }
 
-// Manager Skills 管理器，负责发现、加载、激活、安装技能
-type Manager struct {
+// SkillsManager Skills 管理器，负责发现、加载、激活、安装技能
+type SkillsManager struct {
 	// 已加载的所有 Skill（name -> Skill）
 	skills map[string]*Skill
 	mu     sync.RWMutex
@@ -44,9 +56,18 @@ type Manager struct {
 	installer *Installer
 }
 
-// NewManager 创建 Skills 管理器
-func NewManager(baseDir string, repo SkillRepository) *Manager {
-	return &Manager{
+// ToolNameActivate activate_skill 工具名称
+const ToolNameActivate = "activate_skill"
+
+// ToolNameReadResource read_skill_resource 工具名称
+const ToolNameReadResource = "read_skill_resource"
+
+// ToolNameExecuteScript execute_skill_script 工具名称
+const ToolNameExecuteScript = "execute_skill_script"
+
+// NewSkillsManager 创建 Skills 管理器
+func NewSkillsManager(baseDir string, repo SkillRepository) *SkillsManager {
+	return &SkillsManager{
 		skills:    make(map[string]*Skill),
 		baseDir:   baseDir,
 		repo:      repo,
@@ -55,7 +76,7 @@ func NewManager(baseDir string, repo SkillRepository) *Manager {
 }
 
 // Initialize 初始化管理器：扫描目录、加载所有 Skill 元数据
-func (m *Manager) Initialize() error {
+func (m *SkillsManager) Initialize() error {
 	// 确保目录存在
 	if err := os.MkdirAll(m.baseDir, 0755); err != nil {
 		return fmt.Errorf("failed to create skills directory: %w", err)
@@ -114,8 +135,12 @@ func (m *Manager) Initialize() error {
 	return nil
 }
 
+func (m *SkillsManager) Shutdown() error {
+	return nil
+}
+
 // GetAllSummaries 获取所有已启用 Skill 的摘要（用于注入 system prompt）
-func (m *Manager) GetAllSummaries() []SkillSummary {
+func (m *SkillsManager) GetAllSummaries() []SkillSummary {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -134,12 +159,12 @@ func (m *Manager) GetAllSummaries() []SkillSummary {
 
 // MatchSkills 根据用户消息匹配可能相关的 Skill 名称列表
 // 返回所有已启用 Skill 的名称，由 AI 大模型自行决定激活哪些
-func (m *Manager) MatchSkills() []SkillSummary {
+func (m *SkillsManager) MatchSkills() []SkillSummary {
 	return m.GetAllSummaries()
 }
 
 // ActivateSkill 激活 Skill：加载完整的 instructions 返回给调用方
-func (m *Manager) ActivateSkill(name string) (*Skill, error) {
+func (m *SkillsManager) ActivateSkill(name string) (*Skill, error) {
 	m.mu.RLock()
 	skill, ok := m.skills[name]
 	m.mu.RUnlock()
@@ -155,7 +180,7 @@ func (m *Manager) ActivateSkill(name string) (*Skill, error) {
 }
 
 // ReadResource 读取 Skill 中的附属资源文件
-func (m *Manager) ReadResource(skillName, relativePath string) (string, error) {
+func (m *SkillsManager) ReadResource(skillName, relativePath string) (string, error) {
 	m.mu.RLock()
 	skill, ok := m.skills[skillName]
 	m.mu.RUnlock()
@@ -168,7 +193,7 @@ func (m *Manager) ReadResource(skillName, relativePath string) (string, error) {
 }
 
 // InstallFromGit 从 Git 仓库安装 Skill
-func (m *Manager) InstallFromGit(req SkillInstallRequest) (*Skill, error) {
+func (m *SkillsManager) InstallFromGit(req SkillInstallRequest) (*Skill, error) {
 	if req.Ref == "" {
 		req.Ref = "main"
 	}
@@ -205,7 +230,7 @@ func (m *Manager) InstallFromGit(req SkillInstallRequest) (*Skill, error) {
 }
 
 // Uninstall 卸载 Skill
-func (m *Manager) Uninstall(name string) error {
+func (m *SkillsManager) Uninstall(name string) error {
 	m.mu.Lock()
 	skill, ok := m.skills[name]
 	if !ok {
@@ -230,7 +255,7 @@ func (m *Manager) Uninstall(name string) error {
 }
 
 // Enable 启用 Skill
-func (m *Manager) Enable(name string) error {
+func (m *SkillsManager) Enable(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -246,7 +271,7 @@ func (m *Manager) Enable(name string) error {
 }
 
 // Disable 禁用 Skill
-func (m *Manager) Disable(name string) error {
+func (m *SkillsManager) Disable(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -262,7 +287,7 @@ func (m *Manager) Disable(name string) error {
 }
 
 // GetSkill 获取单个 Skill 信息
-func (m *Manager) GetSkill(name string) (*Skill, bool) {
+func (m *SkillsManager) GetSkill(name string) (*Skill, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	skill, ok := m.skills[name]
@@ -270,7 +295,7 @@ func (m *Manager) GetSkill(name string) (*Skill, bool) {
 }
 
 // GetAllSkills 获取所有 Skill
-func (m *Manager) GetAllSkills() []*Skill {
+func (m *SkillsManager) GetAllSkills() []*Skill {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -278,113 +303,292 @@ func (m *Manager) GetAllSkills() []*Skill {
 	for _, skill := range m.skills {
 		result = append(result, skill)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
 // GetSkillCount 获取已加载的 Skill 数量
-func (m *Manager) GetSkillCount() int {
+func (m *SkillsManager) GetSkillCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.skills)
 }
 
-// BuildSystemPromptSkillsSection 构建注入到 system prompt 中的 Skills 部分
-func (m *Manager) BuildSystemPromptSkillsSection() string {
+// BuildSystemPrompt 构建注入到 system prompt 中的 Skills 部分
+func (m *SkillsManager) BuildSystemPrompt() string {
 	summaries := m.GetAllSummaries()
 	if len(summaries) == 0 {
 		return ""
 	}
 
-	var sb []byte
-	sb = append(sb, "\n\n<available_skills>\n"...)
+	var sb strings.Builder
+	sb.WriteString("\n\n<available_skills>\n")
 
 	for _, s := range summaries {
-		sb = append(sb, fmt.Sprintf(`  <skill>
-    <name>%s</name>
-    <description>%s</description>
-  </skill>
-`, s.Name, s.Description)...)
+		sb.WriteString("  <skill>\n    <name>")
+		sb.WriteString(s.Name)
+		sb.WriteString("</name>\n    <description>")
+		sb.WriteString(s.Description)
+		sb.WriteString("</description>\n  </skill>\n")
 	}
 
-	sb = append(sb, `</available_skills>
+	sb.WriteString(`</available_skills>
 
 当你判断用户的任务与某个 Skill 相关时，请调用 activate_skill 工具来加载该 Skill 的完整指令。
 加载后请严格按照 Skill 指令执行任务。
 如果需要读取 Skill 附带的资源文件（如 scripts/、references/ 等），请调用 read_skill_resource 工具。
 如果 Skill 指令要求运行脚本（如 Python/Shell 脚本），请调用 execute_skill_script 工具执行。
-`...)
+`)
 
-	return string(sb)
+	return sb.String()
 }
 
-// BuildSkillTools 构建 Skills 相关的 OpenAI Function Tools 定义
-// 返回两个工具：activate_skill 和 read_skill_resource
-func (m *Manager) BuildSkillTools() []map[string]interface{} {
+// GetOpenAITools 返回 Skills 相关的 OpenAI Tool 定义
+func (m *SkillsManager) GetOpenAITools() []openai.ChatCompletionToolUnionParam {
 	summaries := m.GetAllSummaries()
 	if len(summaries) == 0 {
 		return nil
 	}
 
-	// 构建可用 Skill 名称列表用于枚举
+	// 获取可用 skill 名称列表
 	var skillNames []string
 	for _, s := range summaries {
 		skillNames = append(skillNames, s.Name)
 	}
 
-	tools := []map[string]interface{}{
-		{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        "activate_skill",
-				"description": "激活一个 Agent Skill，加载其完整的操作指令到上下文中。当你判断用户任务与某个可用 Skill 相关时调用此工具。",
-				"parameters": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"skill_name": map[string]interface{}{
-							"type":        "string",
-							"description": "要激活的 Skill 名称",
-							"enum":        skillNames,
-						},
+	tools := []openai.ChatCompletionToolUnionParam{
+		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        ToolNameActivate,
+			Description: openai.String("激活一个 Agent Skill，加载其完整的操作指令。当你判断用户任务与某个可用 Skill 相关时调用此工具。激活后你将获得该 Skill 的完整操作指令，请严格按照指令执行任务。"),
+			Parameters: openai.FunctionParameters{
+				"type": "object",
+				"properties": map[string]any{
+					"skill_name": map[string]any{
+						"type":        "string",
+						"description": "要激活的 Skill 名称",
+						"enum":        skillNames,
 					},
-					"required": []string{"skill_name"},
 				},
+				"required": []string{"skill_name"},
 			},
-		},
-		{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        "read_skill_resource",
-				"description": "读取已激活 Skill 中的附属资源文件（如 scripts/、references/、assets/ 下的文件）。当 Skill 指令中引用了外部文件时调用此工具。",
-				"parameters": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"skill_name": map[string]interface{}{
-							"type":        "string",
-							"description": "Skill 名称",
-						},
-						"file_path": map[string]interface{}{
-							"type":        "string",
-							"description": "要读取的文件相对路径，例如 scripts/extract.py 或 references/REFERENCE.md",
-						},
+		}),
+		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        ToolNameReadResource,
+			Description: openai.String("读取已激活 Skill 中的附属资源文件。当 Skill 指令中引用了外部文件（如 scripts/、references/、assets/ 下的文件）时调用此工具。"),
+			Parameters: openai.FunctionParameters{
+				"type": "object",
+				"properties": map[string]any{
+					"skill_name": map[string]any{
+						"type":        "string",
+						"description": "Skill 名称",
 					},
-					"required": []string{"skill_name", "file_path"},
+					"file_path": map[string]any{
+						"type":        "string",
+						"description": "要读取的文件相对路径，例如 scripts/extract.py 或 references/REFERENCE.md",
+					},
 				},
+				"required": []string{"skill_name", "file_path"},
 			},
-		},
+		}),
+		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        ToolNameExecuteScript,
+			Description: openai.String("执行已激活 Skill 中的脚本文件。当 Skill 指令要求运行某个脚本（如 Python/Shell 脚本）时调用此工具。脚本将在 Skill 目录下执行。"),
+			Parameters: openai.FunctionParameters{
+				"type": "object",
+				"properties": map[string]any{
+					"skill_name": map[string]any{
+						"type":        "string",
+						"description": "Skill 名称",
+					},
+					"script_path": map[string]any{
+						"type":        "string",
+						"description": "要执行的脚本相对路径，例如 scripts/convert.py 或 scripts/build.sh",
+					},
+					"args": map[string]any{
+						"type":        "string",
+						"description": "传给脚本的命令行参数（空格分隔），可选",
+					},
+				},
+				"required": []string{"skill_name", "script_path"},
+			},
+		}),
 	}
 
 	return tools
 }
 
+// IsSkillTool 判断工具调用是否是 Skills 引擎的工具
+func (m *SkillsManager) IsSkillTool(toolName string) bool {
+	return toolName == ToolNameActivate || toolName == ToolNameReadResource || toolName == ToolNameExecuteScript
+}
+
+// ExecuteToolCall 执行 Skills 工具调用，返回结果字符串
+func (m *SkillsManager) ExecuteToolCall(robotCtx robotctx.RobotContext, toolCall openai.ChatCompletionMessageToolCallUnion) (string, error) {
+	switch toolCall.Function.Name {
+	case ToolNameActivate:
+		return m.executeActivate(toolCall.Function.Arguments)
+	case ToolNameReadResource:
+		return m.executeReadResource(toolCall.Function.Arguments)
+	case ToolNameExecuteScript:
+		return m.executeScript(robotCtx, toolCall.Function.Arguments)
+	default:
+		return "", fmt.Errorf("unknown skill tool: %s", toolCall.Function.Name)
+	}
+}
+
+// executeActivate 执行 activate_skill
+func (m *SkillsManager) executeActivate(argsJSON string) (string, error) {
+	var args struct {
+		SkillName string `json:"skill_name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", fmt.Errorf("failed to parse activate_skill args: %w", err)
+	}
+
+	skill, err := m.ActivateSkill(args.SkillName)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("[Skills] Activated skill: %s", args.SkillName)
+
+	// 返回完整的 Skill 指令
+	result := fmt.Sprintf(`# Skill「%s」已激活
+
+以下是该 Skill 的完整操作指令，请严格遵循执行：
+
+---
+
+%s
+
+---
+
+如需读取 Skill 中引用的附属文件，请调用 read_skill_resource 工具，传入 skill_name="%s" 和对应的 file_path。`,
+		skill.Name, skill.Instructions, skill.Name)
+
+	return result, nil
+}
+
+// executeReadResource 执行 read_skill_resource
+func (m *SkillsManager) executeReadResource(argsJSON string) (string, error) {
+	var args struct {
+		SkillName string `json:"skill_name"`
+		FilePath  string `json:"file_path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", fmt.Errorf("failed to parse read_skill_resource args: %w", err)
+	}
+
+	content, err := m.ReadResource(args.SkillName, args.FilePath)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("[Skills] Read resource: %s / %s (%d bytes)", args.SkillName, args.FilePath, len(content))
+	return content, nil
+}
+
+// executeScript 执行 execute_skill_script
+func (m *SkillsManager) executeScript(robotCtx robotctx.RobotContext, argsJSON string) (string, error) {
+	var args struct {
+		SkillName  string `json:"skill_name"`
+		ScriptPath string `json:"script_path"`
+		Args       string `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", fmt.Errorf("failed to parse execute_skill_script args: %w", err)
+	}
+
+	m.mu.RLock()
+	skill, ok := m.skills[args.SkillName]
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("skill '%s' not found", args.SkillName)
+	}
+
+	// 安全检查：防止路径遍历
+	cleanPath := filepath.Clean(args.ScriptPath)
+	if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		return "", fmt.Errorf("invalid script path: %s", args.ScriptPath)
+	}
+
+	absScript := filepath.Join(skill.Path, cleanPath)
+	// 确认脚本确实在 Skill 目录内
+	if !strings.HasPrefix(absScript, filepath.Clean(skill.Path)+string(filepath.Separator)) {
+		return "", fmt.Errorf("script path escapes skill directory: %s", args.ScriptPath)
+	}
+
+	// 确定执行器
+	var cmdArgs []string
+	ext := strings.ToLower(filepath.Ext(cleanPath))
+	switch ext {
+	case ".py":
+		cmdArgs = append(cmdArgs, "python3", absScript)
+	case ".sh":
+		cmdArgs = append(cmdArgs, "sh", absScript)
+	case ".js":
+		cmdArgs = append(cmdArgs, "node", absScript)
+	case ".ts":
+		cmdArgs = append(cmdArgs, "tsx", absScript)
+	default:
+		// 尝试直接执行
+		cmdArgs = append(cmdArgs, absScript)
+	}
+
+	// 追加用户参数
+	if args.Args != "" {
+		parsedArgs, err := shlex.Split(args.Args)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse script args: %w", err)
+		}
+		cmdArgs = append(cmdArgs, parsedArgs...)
+	}
+
+	log.Printf("[Skills] Executing script: %s (args: %s)", absScript, args.Args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	cmd.Dir = skill.Path
+
+	env := utils.GetPublicEnvVars()
+	env = append(env, robotCtx.ToEnvVars()...)
+	for _, ev := range skill.EnvVars {
+		if ev.Key != "" {
+			env = append(env, ev.Key+"="+ev.Value)
+		}
+	}
+	cmd.Env = env
+
+	output, err := cmd.CombinedOutput()
+	result := string(output)
+
+	// 截断过长输出
+	const maxLen = 50000
+	if len(result) > maxLen {
+		result = result[:maxLen] + "\n...(output truncated)"
+	}
+
+	if err != nil {
+		return fmt.Sprintf("Script execution failed: %v\n\nOutput:\n%s", err, result), nil
+	}
+
+	log.Printf("[Skills] Script completed: %s (%d bytes output)", absScript, len(output))
+	return result, nil
+}
+
 // syncToDB 将所有内存中的 Skill 同步到数据库
-func (m *Manager) syncToDB() {
+func (m *SkillsManager) syncToDB() {
 	for _, skill := range m.skills {
 		m.saveSkillToDB(skill)
 	}
 }
 
 // saveSkillToDB 将单个 Skill 保存到数据库
-func (m *Manager) saveSkillToDB(skill *Skill) {
+func (m *SkillsManager) saveSkillToDB(skill *Skill) {
 	record := SkillRecord{
 		Name:        skill.Name,
 		Path:        skill.Path,
@@ -399,7 +603,7 @@ func (m *Manager) saveSkillToDB(skill *Skill) {
 }
 
 // SetEnvVars 设置 Skill 的环境变量
-func (m *Manager) SetEnvVars(name string, envVars []EnvVar) error {
+func (m *SkillsManager) SetEnvVars(name string, envVars []EnvVar) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -414,7 +618,7 @@ func (m *Manager) SetEnvVars(name string, envVars []EnvVar) error {
 }
 
 // UpdateSkill 热更新 Skill（从 Git 重新拉取最新版本）
-func (m *Manager) UpdateSkill(name string) (*Skill, error) {
+func (m *SkillsManager) UpdateSkill(name string) (*Skill, error) {
 	m.mu.RLock()
 	existing, ok := m.skills[name]
 	m.mu.RUnlock()
@@ -449,6 +653,7 @@ func (m *Manager) UpdateSkill(name string) (*Skill, error) {
 	skill.Enabled = existing.Enabled
 	skill.InstalledAt = existing.InstalledAt
 	skill.Source = existing.Source
+	skill.EnvVars = existing.EnvVars
 
 	m.mu.Lock()
 	m.skills[skill.Name] = skill

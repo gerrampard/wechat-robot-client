@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"html"
 	"image"
 	"image/color"
 	"image/draw"
@@ -18,6 +20,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,23 +36,122 @@ import (
 )
 
 type VideoParseResponse struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
-		Author     string   `json:"author"`
-		Avatar     string   `json:"avatar"`
-		Title      string   `json:"title"`
-		Desc       string   `json:"desc"`
-		Digg       int32    `json:"digg"`
-		Comment    int32    `json:"comment"`
-		Play       int32    `json:"play"`
-		CreateTime int64    `json:"create_time"`
-		Cover      string   `json:"cover"`
-		URL        string   `json:"url"`
-		Images     []string `json:"images"`
-		MusicURL   string   `json:"music_url"`
-	} `json:"data"`
+	Code int            `json:"code"`
+	Msg  string         `json:"msg"`
+	Data VideoParseData `json:"data"`
 }
+
+type VideoParseData struct {
+	Author       string   `json:"author"`
+	Avatar       string   `json:"avatar"`
+	Title        string   `json:"title"`
+	Desc         string   `json:"desc"`
+	Digg         int32    `json:"digg"`
+	Comment      int32    `json:"comment"`
+	Play         int32    `json:"play"`
+	CreateTime   int64    `json:"create_time"`
+	Cover        string   `json:"cover"`
+	URL          string   `json:"url"`
+	SendVideoURL string   `json:"send_video_url"`
+	Images       []string `json:"images"`
+	MusicURL     string   `json:"music_url"`
+}
+
+type ExternalVideoParseResponse struct {
+	Code      int                    `json:"code"`
+	Msg       string                 `json:"msg"`
+	Data      ExternalVideoParseData `json:"data"`
+	APISource string                 `json:"api_source"`
+}
+
+type ExternalVideoParseData struct {
+	CreateTime int64               `json:"create_time"`
+	Author     string              `json:"author"`
+	Avatar     string              `json:"avatar"`
+	Title      string              `json:"title"`
+	Digg       int32               `json:"digg"`
+	Comment    int32               `json:"comment"`
+	Cover      string              `json:"cover"`
+	URL        string              `json:"url"`
+	Images     []string            `json:"images"`
+	MusicURL   string              `json:"music_url"`
+	VideoList  []ExternalVideoItem `json:"video_list"`
+}
+
+type ExternalVideoItem struct {
+	QualityName string `json:"quality_name"`
+	FPS         int    `json:"fps"`
+	VideoSize   string `json:"video_size"`
+	VideoURL    string `json:"video_url"`
+}
+
+type DouyinRouterData struct {
+	LoaderData map[string]DouyinLoaderPageData `json:"loaderData"`
+}
+
+type DouyinLoaderPageData struct {
+	VideoInfoRes DouyinVideoInfoRes `json:"videoInfoRes"`
+}
+
+type DouyinVideoInfoRes struct {
+	ItemList []DouyinAwemeItem `json:"item_list"`
+}
+
+type DouyinAwemeItem struct {
+	Desc       string            `json:"desc"`
+	Author     DouyinAuthor      `json:"author"`
+	Music      DouyinMusic       `json:"music"`
+	Video      DouyinVideo       `json:"video"`
+	Images     []DouyinImageInfo `json:"images"`
+	ImageInfos []DouyinImageInfo `json:"image_infos"`
+	ImgBitrate []DouyinImageGear `json:"img_bitrate"`
+}
+
+type DouyinAuthor struct {
+	Nickname     string            `json:"nickname"`
+	Signature    string            `json:"signature"`
+	AvatarThumb  DouyinURLResource `json:"avatar_thumb"`
+	AvatarMedium DouyinURLResource `json:"avatar_medium"`
+}
+
+type DouyinMusic struct {
+	Mid         string            `json:"mid"`
+	Title       string            `json:"title"`
+	Author      string            `json:"author"`
+	PlayURL     DouyinURLResource `json:"play_url"`
+	CoverHD     DouyinURLResource `json:"cover_hd"`
+	CoverLarge  DouyinURLResource `json:"cover_large"`
+	CoverMedium DouyinURLResource `json:"cover_medium"`
+	CoverThumb  DouyinURLResource `json:"cover_thumb"`
+}
+
+type DouyinVideo struct {
+	Duration *int64            `json:"duration"`
+	PlayAddr DouyinURLResource `json:"play_addr"`
+	Cover    DouyinURLResource `json:"cover"`
+}
+
+type DouyinImageInfo struct {
+	URI             string   `json:"uri"`
+	URLList         []string `json:"url_list"`
+	DownloadURLList []string `json:"download_url_list"`
+}
+
+type DouyinImageGear struct {
+	Name   string            `json:"name"`
+	Images []DouyinImageInfo `json:"images"`
+}
+
+type DouyinURLResource struct {
+	URI     string   `json:"uri"`
+	URLList []string `json:"url_list"`
+}
+
+const douyinUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+
+var (
+	douyinRouterDataRegexp = regexp.MustCompile(`(?s)window\._ROUTER_DATA\s*=\s*({.*?})\s*</script>`)
+)
 
 type DouyinVideoParsePlugin struct{}
 
@@ -83,6 +185,10 @@ func (p *DouyinVideoParsePlugin) PostAction(ctx *plugin.MessageContext) {
 }
 
 func (p *DouyinVideoParsePlugin) Match(ctx *plugin.MessageContext) bool {
+	if ctx.ReferMessage != nil {
+		// 不解析引用的抖音链接
+		return false
+	}
 	return strings.Contains(ctx.Message.Content, "https://v.douyin.com")
 }
 
@@ -97,30 +203,22 @@ func (p *DouyinVideoParsePlugin) Run(ctx *plugin.MessageContext) {
 		ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, "未找到抖音链接")
 		return
 	}
-
-	// 获取第一个匹配的链接
 	douyinURL := matches[0]
 
-	var respData VideoParseResponse
-	client := resty.New()
-	resp, err := client.R().
-		SetHeader("Content-Type", "application/json").
-		SetBody(map[string]string{
-			"key": vars.ThirdPartyApiKey,
-			"url": douyinURL,
-		}).
-		SetResult(&respData).
-		Post("https://api.pearktrue.cn/api/video/api.php")
+	externalAPIParsed := false
+	respData, err := parseDouyinVideo(douyinURL)
 	if err != nil {
-		ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, err.Error())
-		return
-	}
-	if resp.StatusCode() != http.StatusOK {
-		ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, http.StatusText(resp.StatusCode()))
-		return
+		fallbackRespData, err2 := parseDouyinVideoByExternalAPI(douyinURL)
+		if err2 != nil {
+			ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, formatDouyinFallbackError(err, err2))
+			return
+		}
+		externalAPIParsed = true
+		respData = fallbackRespData
 	}
 
 	if respData.Data.URL != "" {
+		// 发送抖音分享链接
 		shareLink := robot.ShareLinkMessage{
 			Title:    fmt.Sprintf("抖音视频解析成功 - %s", respData.Data.Author),
 			Des:      respData.Data.Title,
@@ -130,9 +228,25 @@ func (p *DouyinVideoParsePlugin) Run(ctx *plugin.MessageContext) {
 		if respData.Data.Desc != "" {
 			shareLink.Des = respData.Data.Desc
 		}
-
 		_ = ctx.MessageService.ShareLink(ctx.Message.FromWxID, shareLink)
-		_ = ctx.MessageService.SendVideoMessageByRemoteURL(ctx.Message.FromWxID, respData.Data.URL)
+
+		// 发送抖音视频
+		if !externalAPIParsed {
+			fallbackRespData, err2 := parseDouyinVideoByExternalAPI(douyinURL)
+			if err2 != nil {
+				log.Printf("调用外部接口获取抖音发送视频地址失败: %v\n", err2)
+			} else if fallbackRespData.Data.SendVideoURL != "" {
+				respData.Data.SendVideoURL = fallbackRespData.Data.SendVideoURL
+			}
+		}
+		sendVideoURL := respData.Data.SendVideoURL
+		if sendVideoURL == "" {
+			sendVideoURL = respData.Data.URL
+		}
+		err = ctx.MessageService.SendVideoMessageByRemoteURL(ctx.Message.FromWxID, sendVideoURL)
+		if err != nil {
+			ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, fmt.Sprintf("发送抖音视频失败: %v", err.Error()))
+		}
 
 		return
 	}
@@ -141,12 +255,17 @@ func (p *DouyinVideoParsePlugin) Run(ctx *plugin.MessageContext) {
 		ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, fmt.Sprintf("抖音图片解析成功\n作者: %s\n标题: %s\n\n%d张图片正在发送中...", respData.Data.Author, respData.Data.Title, len(respData.Data.Images)))
 
 		if respData.Data.MusicURL != "" {
-			go func(musicurl string) {
-				err := sendFileByRemoteURL(ctx, musicurl)
+			go func(musicURL, title, author string) {
+				var err error
+				if isAudioURL(musicURL) {
+					err = sendMusicMessageByURL(ctx, musicURL, author)
+				} else {
+					err = sendFileByRemoteURL(ctx, musicURL)
+				}
 				if err != nil {
 					ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, fmt.Sprintf("发送抖音音频失败: %v", err))
 				}
-			}(respData.Data.MusicURL)
+			}(respData.Data.MusicURL, respData.Data.Title, respData.Data.Author)
 		}
 
 		imageURLs := respData.Data.Images
@@ -176,6 +295,441 @@ func (p *DouyinVideoParsePlugin) Run(ctx *plugin.MessageContext) {
 	}
 
 	ctx.MessageService.SendTextMessage(ctx.Message.FromWxID, "解析失败，可能是链接已失效或格式不正确")
+}
+
+func parseDouyinVideo(rawURL string) (VideoParseResponse, error) {
+	resolvedURL, err := resolveDouyinRedirect(rawURL)
+	if err != nil {
+		return VideoParseResponse{}, err
+	}
+
+	htmlContent, err := fetchDouyinPageHTML(resolvedURL)
+	if err != nil {
+		return VideoParseResponse{}, err
+	}
+	data, err := parseDouyinPageHTML(htmlContent)
+	if err != nil {
+		return VideoParseResponse{}, err
+	}
+	return VideoParseResponse{Code: http.StatusOK, Data: data}, nil
+}
+
+func parseDouyinVideoByExternalAPI(douyinURL string) (VideoParseResponse, error) {
+	var respData ExternalVideoParseResponse
+	client := resty.New()
+	resp, err := client.R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(map[string]string{
+			"key": vars.ThirdPartyApiKey,
+			"url": douyinURL,
+		}).
+		SetResult(&respData).
+		Post("https://api.pearapi.ai/api/video/api.php")
+	if err != nil {
+		return VideoParseResponse{}, err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return VideoParseResponse{}, fmt.Errorf("外部接口请求失败，状态码: %d %s", resp.StatusCode(), http.StatusText(resp.StatusCode()))
+	}
+	if respData.Code != http.StatusOK {
+		return VideoParseResponse{}, fmt.Errorf("外部接口解析失败，code: %d, msg: %s", respData.Code, respData.Msg)
+	}
+
+	convertedData, err := convertExternalVideoParseData(respData.Data)
+	if err != nil {
+		return VideoParseResponse{}, err
+	}
+	return VideoParseResponse{Code: respData.Code, Msg: respData.Msg, Data: convertedData}, nil
+}
+
+func convertExternalVideoParseData(data ExternalVideoParseData) (VideoParseData, error) {
+	title := cleanDouyinText(data.Title)
+	convertedData := VideoParseData{
+		Author:     cleanDouyinText(data.Author),
+		Avatar:     data.Avatar,
+		Title:      title,
+		Desc:       title,
+		Digg:       data.Digg,
+		Comment:    data.Comment,
+		CreateTime: data.CreateTime,
+		Cover:      data.Cover,
+		URL:        data.URL,
+		Images:     data.Images,
+		MusicURL:   data.MusicURL,
+	}
+
+	if len(data.VideoList) == 0 {
+		return convertedData, nil
+	}
+
+	videoURL, err := pickExternalVideoURL(data.VideoList)
+	if err != nil {
+		return VideoParseData{}, err
+	}
+	convertedData.SendVideoURL = videoURL
+	return convertedData, nil
+}
+
+func pickExternalVideoURL(videoList []ExternalVideoItem) (string, error) {
+	const maxVideoSizeBytes = 25 * 1024 * 1024
+	for _, video := range videoList {
+		if video.VideoURL == "" {
+			continue
+		}
+		videoSizeBytes, err := parseExternalVideoSize(video.VideoSize)
+		if err != nil {
+			continue
+		}
+		if videoSizeBytes < maxVideoSizeBytes {
+			return video.VideoURL, nil
+		}
+	}
+	return "", fmt.Errorf("外部接口返回的视频均大于等于25M，无法发送")
+}
+
+func parseExternalVideoSize(videoSize string) (float64, error) {
+	match := regexp.MustCompile(`(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?i?b?|bytes?)?\s*$`).FindStringSubmatch(videoSize)
+	if len(match) < 2 {
+		return 0, fmt.Errorf("解析视频大小失败: %s", videoSize)
+	}
+	size, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("解析视频大小失败: %w", err)
+	}
+
+	unit := "B"
+	if len(match) > 2 && match[2] != "" {
+		unit = strings.ToUpper(match[2])
+	}
+	switch strings.TrimSuffix(unit, "S") {
+	case "B", "BYTE":
+		return size, nil
+	case "KB", "K", "KIB":
+		return size * 1024, nil
+	case "MB", "M", "MIB":
+		return size * 1024 * 1024, nil
+	case "GB", "G", "GIB":
+		return size * 1024 * 1024 * 1024, nil
+	default:
+		return 0, fmt.Errorf("未知视频大小单位: %s", unit)
+	}
+}
+
+func formatDouyinFallbackError(parseErr, fallbackErr error) string {
+	return fmt.Sprintf("抖音解析失败: %v\n外部接口解析失败: %v", parseErr, fallbackErr)
+}
+
+func resolveDouyinRedirect(rawURL string) (string, error) {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建抖音短链请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", douyinUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("解析抖音短链失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+		location, err := resp.Location()
+		if err != nil {
+			return rawURL, nil
+		}
+		return location.String(), nil
+	}
+	return resp.Request.URL.String(), nil
+}
+
+func fetchDouyinPageHTML(pageURL string) (string, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, pageURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建抖音页面请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", douyinUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("获取抖音页面失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("获取抖音页面失败，状态码: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取抖音页面失败: %w", err)
+	}
+	if len(body) == 0 {
+		return "", fmt.Errorf("抖音页面内容为空")
+	}
+	return string(body), nil
+}
+
+func parseDouyinPageHTML(htmlContent string) (VideoParseData, error) {
+	if item, ok := extractDouyinAwemeItem(htmlContent); ok {
+		if note, ok := parseDouyinNoteItem(item); ok {
+			return note, nil
+		}
+		if video, ok := parseDouyinVideoItem(item); ok {
+			return video, nil
+		}
+	}
+	return VideoParseData{}, fmt.Errorf("阿拉蕾，解析出错了~")
+}
+
+func extractDouyinAwemeItem(htmlContent string) (DouyinAwemeItem, bool) {
+	match := douyinRouterDataRegexp.FindStringSubmatch(htmlContent)
+	if len(match) < 2 {
+		return DouyinAwemeItem{}, false
+	}
+
+	var routerData DouyinRouterData
+	if err := json.Unmarshal([]byte(match[1]), &routerData); err != nil {
+		log.Printf("解析抖音 _ROUTER_DATA 失败: %v\n", err)
+		return DouyinAwemeItem{}, false
+	}
+
+	for _, pageData := range routerData.LoaderData {
+		if len(pageData.VideoInfoRes.ItemList) > 0 {
+			return pageData.VideoInfoRes.ItemList[0], true
+		}
+	}
+	return DouyinAwemeItem{}, false
+}
+
+func parseDouyinNoteItem(item DouyinAwemeItem) (VideoParseData, bool) {
+	imageURLGroups := pickDouyinImageURLGroups(item)
+	if len(imageURLGroups) == 0 {
+		return VideoParseData{}, false
+	}
+
+	imageURLs := make([]string, 0, len(imageURLGroups))
+	for _, group := range imageURLGroups {
+		imageURLs = append(imageURLs, group[0])
+	}
+	desc := cleanDouyinText(item.Desc)
+	return VideoParseData{
+		Author:   cleanDouyinText(item.Author.Nickname),
+		Avatar:   pickDouyinAvatarURL(item.Author),
+		Title:    desc,
+		Desc:     desc,
+		Images:   imageURLs,
+		MusicURL: pickDouyinNoteMusicURL(item),
+	}, true
+}
+
+func pickDouyinImageURLGroups(item DouyinAwemeItem) [][]string {
+	imageList := item.Images
+	if len(imageList) == 0 {
+		imageList = item.ImageInfos
+	}
+	imageURLGroups := make([][]string, 0, len(imageList))
+	seenGroups := make(map[string]bool)
+	for _, imageInfo := range imageList {
+		candidates := make([]string, 0)
+		seenURLs := make(map[string]bool)
+		for _, imageURL := range imageInfo.URLList {
+			if !strings.HasPrefix(imageURL, "http") {
+				continue
+			}
+			decodedURL := html.UnescapeString(imageURL)
+			if seenURLs[decodedURL] {
+				continue
+			}
+			candidates = append(candidates, decodedURL)
+			seenURLs[decodedURL] = true
+		}
+
+		groupKey := strings.Join(candidates, "\x00")
+		if len(candidates) > 0 && !seenGroups[groupKey] {
+			imageURLGroups = append(imageURLGroups, candidates)
+			seenGroups[groupKey] = true
+		}
+	}
+	return imageURLGroups
+}
+
+func parseDouyinVideoItem(item DouyinAwemeItem) (VideoParseData, bool) {
+	if item.Video.Duration != nil && *item.Video.Duration == 0 {
+		return VideoParseData{}, false
+	}
+
+	videoURL := pickDouyinVideoURL(item.Video.PlayAddr.URLList)
+	if videoURL == "" {
+		return VideoParseData{}, false
+	}
+
+	desc := cleanDouyinText(item.Desc)
+	return VideoParseData{
+		Author:   cleanDouyinText(item.Author.Nickname),
+		Avatar:   pickDouyinAvatarURL(item.Author),
+		Title:    desc,
+		Desc:     desc,
+		Cover:    pickPreferredDouyinURL(item.Video.Cover.URLList),
+		URL:      videoURL,
+		MusicURL: pickPreferredDouyinURL(item.Music.PlayURL.URLList),
+	}, true
+}
+
+func pickDouyinAvatarURL(author DouyinAuthor) string {
+	if avatarURL := pickPreferredDouyinURL(author.AvatarMedium.URLList); avatarURL != "" {
+		return avatarURL
+	}
+	return pickPreferredDouyinURL(author.AvatarThumb.URLList)
+}
+
+func pickDouyinNoteMusicURL(item DouyinAwemeItem) string {
+	if musicURL := pickPreferredDouyinURL(item.Music.PlayURL.URLList); musicURL != "" {
+		return musicURL
+	}
+	if strings.HasPrefix(item.Video.PlayAddr.URI, "http") {
+		return decodeDouyinEscapedValue(item.Video.PlayAddr.URI)
+	}
+	return pickPreferredDouyinURL(item.Video.PlayAddr.URLList)
+}
+
+func pickDouyinVideoURL(urls []string) string {
+	decodedURLs := make([]string, 0, len(urls))
+	for _, rawURL := range urls {
+		if rawURL == "" {
+			continue
+		}
+		decodedURL := strings.ReplaceAll(decodeDouyinEscapedValue(rawURL), "playwm", "play")
+		decodedURLs = append(decodedURLs, decodedURL)
+	}
+	for _, decodedURL := range decodedURLs {
+		if strings.Contains(decodedURL, "aweme.snssdk.com") {
+			return decodedURL
+		}
+	}
+	if len(decodedURLs) > 0 {
+		return decodedURLs[0]
+	}
+	return ""
+}
+
+func pickPreferredDouyinURL(urls []string) string {
+	firstURL := ""
+	for _, rawURL := range urls {
+		if rawURL == "" {
+			continue
+		}
+		decodedURL := decodeDouyinEscapedValue(rawURL)
+		if decodedURL == "" {
+			continue
+		}
+		if strings.HasPrefix(decodedURL, "https://p26") {
+			return decodedURL
+		}
+		if firstURL == "" {
+			firstURL = decodedURL
+		}
+	}
+	return firstURL
+}
+
+func matchDouyinJSONString(text string, key string) string {
+	pattern := regexp.MustCompile(fmt.Sprintf(`"%s":\s*"([^"]*)"`, regexp.QuoteMeta(key)))
+	match := pattern.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return ""
+	}
+	return cleanDouyinText(decodeDouyinEscapedValue(match[1]))
+}
+
+func decodeDouyinEscapedValue(value string) string {
+	decodedValue := html.UnescapeString(value)
+	if strings.Contains(decodedValue, `\`) {
+		var unquotedValue string
+		if err := json.Unmarshal([]byte(`"`+strings.ReplaceAll(decodedValue, `"`, `\"`)+`"`), &unquotedValue); err == nil {
+			decodedValue = unquotedValue
+		}
+	}
+	return html.UnescapeString(decodedValue)
+}
+
+func cleanDouyinText(value string) string {
+	return strings.TrimSpace(html.UnescapeString(value))
+}
+
+func nestedString(root map[string]any, keys ...string) string {
+	current := any(root)
+	for _, key := range keys {
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = currentMap[key]
+	}
+	return stringFromAny(current)
+}
+
+func nestedStringList(root map[string]any, keys ...string) []string {
+	current := any(root)
+	for _, key := range keys {
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = currentMap[key]
+	}
+	return stringListFromAny(current)
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	if str, ok := value.(string); ok {
+		return str
+	}
+	return fmt.Sprint(value)
+}
+
+func listFromAny(value any) []any {
+	if list, ok := value.([]any); ok {
+		return list
+	}
+	return nil
+}
+
+func stringListFromAny(value any) []string {
+	list, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	stringsList := make([]string, 0, len(list))
+	for _, item := range list {
+		if str, ok := item.(string); ok {
+			stringsList = append(stringsList, str)
+		}
+	}
+	return stringsList
+}
+
+func numberFromAny(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
 }
 
 func (p *DouyinVideoParsePlugin) sendImagesInSmallerBatches(ctx *plugin.MessageContext, imageURLs []string, batchSize int) {
@@ -230,7 +784,10 @@ func mergeImagesVertical(ctx *plugin.MessageContext, imageURLs []string) ([]byte
 		if utils.IsVideo(bodyData.Bytes()) {
 			log.Printf("%s 解析到视频，跳过合并，直接发送视频消息\n", imageURL)
 			go func(toWxID, _imageURL string) {
-				_ = ctx.MessageService.SendVideoMessageByRemoteURL(toWxID, _imageURL)
+				err2 := ctx.MessageService.SendVideoMessageByRemoteURL(toWxID, _imageURL)
+				if err2 != nil {
+					ctx.MessageService.SendTextMessage(toWxID, fmt.Sprintf("发送抖音视频失败: %v", err2.Error()))
+				}
 			}(ctx.Message.FromWxID, imageURL)
 			continue
 		}
@@ -289,6 +846,43 @@ func mergeImagesVertical(ctx *plugin.MessageContext, imageURLs []string) ([]byte
 }
 
 const jpegMaxDimension = 65535
+
+var audioExtensions = map[string]bool{
+	".mp3":  true,
+	".m4a":  true,
+	".aac":  true,
+	".ogg":  true,
+	".flac": true,
+	".wav":  true,
+	".wma":  true,
+	".amr":  true,
+}
+
+func isAudioURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	return audioExtensions[ext]
+}
+
+func sendMusicMessageByURL(ctx *plugin.MessageContext, musicURL, author string) error {
+	const (
+		appID    = "wx8dd6ecd81906fd84"
+		coverURL = "https://uranus-houhou.oss-cn-beijing.aliyuncs.com/douyin.png"
+	)
+	songInfo := robot.SongInfo{}
+	songInfo.FromUsername = vars.RobotRuntime.WxID
+	songInfo.AppID = appID
+	songInfo.Title = "抖音解析背景音乐"
+	songInfo.Singer = author
+	songInfo.Url = musicURL
+	songInfo.MusicUrl = musicURL
+	songInfo.CoverUrl = coverURL
+	_, err := vars.RobotRuntime.SendMusicMessage(ctx.Message.FromWxID, songInfo)
+	return err
+}
 
 func isImageTooLargeError(err error) bool {
 	if err == nil {
@@ -369,7 +963,7 @@ func sendFileByRemoteURL(ctx *plugin.MessageContext, fileURL string) error {
 	fileSize := int64(len(fileData))
 	chunkSize := vars.UploadFileChunkSize
 	if chunkSize <= 0 {
-		chunkSize = 50000
+		chunkSize = 200 * 1000
 	}
 	totalChunks := (fileSize + chunkSize - 1) / chunkSize
 	clientAppDataID := fmt.Sprintf("%v_%v", vars.RobotRuntime.WxID, time.Now().UnixNano())

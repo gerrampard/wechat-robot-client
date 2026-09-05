@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"time"
 	"wechat-robot-client/model"
 
 	"gorm.io/gorm"
@@ -17,106 +16,174 @@ func NewMemoryRepo(ctx context.Context, db *gorm.DB) *Memory {
 	return &Memory{Ctx: ctx, DB: db}
 }
 
-func (r *Memory) Create(memory *model.Memory) error {
-	now := time.Now().Unix()
-	memory.CreatedAt = now
-	memory.UpdatedAt = now
+func (r *Memory) GetState(robotCode, scope, contactWxID, chatRoomID string) (*model.MemoryExtractionState, error) {
+	var state model.MemoryExtractionState
+	err := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND scope = ? AND contact_wxid = ? AND chat_room_id = ?", robotCode, scope, contactWxID, chatRoomID).
+		First(&state).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func (r *Memory) SaveState(state *model.MemoryExtractionState) error {
+	if state.ID == 0 {
+		return r.DB.WithContext(r.Ctx).Create(state).Error
+	}
+	return r.DB.WithContext(r.Ctx).Where("id = ?", state.ID).Updates(state).Error
+}
+
+func (r *Memory) GetByHash(robotCode, hash string) (*model.Memory, error) {
+	var memory model.Memory
+	err := r.DB.WithContext(r.Ctx).Where("robot_code = ? AND hash = ?", robotCode, hash).First(&memory).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &memory, nil
+}
+
+func (r *Memory) CreateMemory(memory *model.Memory) error {
 	return r.DB.WithContext(r.Ctx).Create(memory).Error
 }
 
-func (r *Memory) Update(memory *model.Memory) error {
-	memory.UpdatedAt = time.Now().Unix()
-	return r.DB.WithContext(r.Ctx).Save(memory).Error
+func (r *Memory) UpdateMemory(memory *model.Memory) error {
+	return r.DB.WithContext(r.Ctx).Where("id = ?", memory.ID).Updates(memory).Error
 }
 
-func (r *Memory) Delete(id int64) error {
-	return r.DB.WithContext(r.Ctx).Delete(&model.Memory{}, id).Error
-}
-
-func (r *Memory) GetByID(id int64) (*model.Memory, error) {
-	var memory model.Memory
-	err := r.DB.WithContext(r.Ctx).Where("id = ?", id).First(&memory).Error
-	if err == gorm.ErrRecordNotFound {
+func (r *Memory) GetMemoriesByVectorIDs(vectorIDs []string) ([]*model.Memory, error) {
+	if len(vectorIDs) == 0 {
 		return nil, nil
 	}
-	return &memory, err
-}
-
-// GetByContactAndKey 根据联系人和 key 查找记忆（用于去重合并）
-func (r *Memory) GetByContactAndKey(contactWxID, key string) (*model.Memory, error) {
-	var memory model.Memory
-	err := r.DB.WithContext(r.Ctx).
-		Where("contact_wxid = ? AND `key` = ?", contactWxID, key).
-		First(&memory).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, nil
-	}
-	return &memory, err
-}
-
-// GetByContact 获取某个联系人的所有记忆
-func (r *Memory) GetByContact(contactWxID string, limit int) ([]*model.Memory, error) {
 	var memories []*model.Memory
-	err := r.DB.WithContext(r.Ctx).
-		Where("contact_wxid = ?", contactWxID).
-		Where("expire_at = 0 OR expire_at > ?", time.Now().Unix()).
-		Order("importance DESC, updated_at DESC").
-		Limit(limit).
-		Find(&memories).Error
+	err := r.DB.WithContext(r.Ctx).Where("vector_id IN ?", vectorIDs).Find(&memories).Error
 	return memories, err
 }
 
-// GetByContactAndType 获取某个联系人特定类型的记忆
-func (r *Memory) GetByContactAndType(contactWxID string, memoryType model.MemoryType, limit int) ([]*model.Memory, error) {
-	var memories []*model.Memory
-	err := r.DB.WithContext(r.Ctx).
-		Where("contact_wxid = ? AND `type` = ?", contactWxID, memoryType).
-		Where("expire_at = 0 OR expire_at > ?", time.Now().Unix()).
-		Order("importance DESC, updated_at DESC").
-		Limit(limit).
-		Find(&memories).Error
-	return memories, err
-}
-
-// IncrementAccessCount 增加访问计数
-func (r *Memory) IncrementAccessCount(ids []int64) error {
-	return r.DB.WithContext(r.Ctx).
-		Model(&model.Memory{}).
-		Where("id IN ?", ids).
-		Updates(map[string]any{
-			"access_count":   gorm.Expr("access_count + 1"),
-			"last_access_at": time.Now().Unix(),
-		}).Error
-}
-
-// DecayMemories 衰减长期未访问的记忆重要性
-func (r *Memory) DecayMemories(inactiveDays int) error {
-	threshold := time.Now().AddDate(0, 0, -inactiveDays).Unix()
-	return r.DB.WithContext(r.Ctx).
-		Model(&model.Memory{}).
-		Where("last_access_at < ? AND importance > 1", threshold).
-		Update("importance", gorm.Expr("importance - 1")).Error
-}
-
-// DeleteExpired 删除过期记忆
-func (r *Memory) DeleteExpired() error {
-	return r.DB.WithContext(r.Ctx).
-		Where("expire_at > 0 AND expire_at < ?", time.Now().Unix()).
-		Delete(&model.Memory{}).Error
-}
-
-// SearchByKeyword 关键词搜索记忆
-func (r *Memory) SearchByKeyword(contactWxID, keyword string, limit int) ([]*model.Memory, error) {
+func (r *Memory) ListRelationMemories(robotCode, chatRoomID, participantWxID string, limit int) ([]*model.Memory, error) {
 	var memories []*model.Memory
 	query := r.DB.WithContext(r.Ctx).
-		Where("expire_at = 0 OR expire_at > ?", time.Now().Unix())
-	if contactWxID != "" {
-		query = query.Where("contact_wxid = ?", contactWxID)
+		Where("robot_code = ? AND chat_room_id = ? AND scope = ?", robotCode, chatRoomID, model.MemoryScopeRelation).
+		Where("JSON_CONTAINS(participants, JSON_QUOTE(?))", participantWxID).
+		Order("importance DESC, last_seen_at DESC, id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
 	}
-	err := query.
-		Where("content LIKE ? OR `key` LIKE ?", "%"+keyword+"%", "%"+keyword+"%").
-		Order("importance DESC").
-		Limit(limit).
-		Find(&memories).Error
-	return memories, err
+	if err := query.Find(&memories).Error; err != nil {
+		return nil, err
+	}
+	return memories, nil
+}
+
+func (r *Memory) ListMemberMemories(robotCode, chatRoomID, memberWxID string, limit int) ([]*model.Memory, error) {
+	var memories []*model.Memory
+	query := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND scope = ? AND contact_wxid = ?", robotCode, chatRoomID, model.MemoryScopeGroupMember, memberWxID).
+		Order("importance DESC, last_seen_at DESC, id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&memories).Error; err != nil {
+		return nil, err
+	}
+	return memories, nil
+}
+
+func (r *Memory) ListRelationMemoriesBetween(robotCode, chatRoomID, firstWxID, secondWxID string, limit int) ([]*model.Memory, error) {
+	var memories []*model.Memory
+	query := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND scope = ?", robotCode, chatRoomID, model.MemoryScopeRelation).
+		Where("JSON_CONTAINS(participants, JSON_QUOTE(?))", firstWxID).
+		Where("JSON_CONTAINS(participants, JSON_QUOTE(?))", secondWxID).
+		Order("importance DESC, last_seen_at DESC, id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&memories).Error; err != nil {
+		return nil, err
+	}
+	return memories, nil
+}
+
+func (r *Memory) UpsertMemberProfile(profile *model.MemberProfile) error {
+	var existing model.MemberProfile
+	err := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND member_wxid = ?", profile.RobotCode, profile.ChatRoomID, profile.MemberWxID).
+		First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return r.DB.WithContext(r.Ctx).Create(profile).Error
+	}
+	if err != nil {
+		return err
+	}
+	profile.ID = existing.ID
+	profile.CreatedAt = existing.CreatedAt
+	return r.DB.WithContext(r.Ctx).Where("id = ?", existing.ID).Updates(profile).Error
+}
+
+func (r *Memory) GetMemberProfile(robotCode, chatRoomID, memberWxID string) (*model.MemberProfile, error) {
+	var profile model.MemberProfile
+	err := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND member_wxid = ?", robotCode, chatRoomID, memberWxID).
+		First(&profile).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &profile, nil
+}
+
+func (r *Memory) UpsertMemberRelationship(rel *model.MemberRelationship) error {
+	var existing model.MemberRelationship
+	err := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND from_wxid = ? AND to_wxid = ? AND relation_type = ?", rel.RobotCode, rel.ChatRoomID, rel.FromWxID, rel.ToWxID, rel.RelationType).
+		First(&existing).Error
+	if err == gorm.ErrRecordNotFound {
+		return r.DB.WithContext(r.Ctx).Create(rel).Error
+	}
+	if err != nil {
+		return err
+	}
+	rel.ID = existing.ID
+	rel.CreatedAt = existing.CreatedAt
+	return r.DB.WithContext(r.Ctx).Where("id = ?", existing.ID).Updates(rel).Error
+}
+
+func (r *Memory) ListMemberRelationships(robotCode, chatRoomID, memberWxID string, limit int) ([]*model.MemberRelationship, error) {
+	var relationships []*model.MemberRelationship
+	query := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND (from_wxid = ? OR to_wxid = ?)", robotCode, chatRoomID, memberWxID, memberWxID).
+		Order("strength DESC, last_seen_at DESC, id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&relationships).Error; err != nil {
+		return nil, err
+	}
+	return relationships, nil
+}
+
+func (r *Memory) ListMemberRelationshipsBetween(robotCode, chatRoomID, firstWxID, secondWxID string, limit int) ([]*model.MemberRelationship, error) {
+	if firstWxID > secondWxID {
+		firstWxID, secondWxID = secondWxID, firstWxID
+	}
+	var relationships []*model.MemberRelationship
+	query := r.DB.WithContext(r.Ctx).
+		Where("robot_code = ? AND chat_room_id = ? AND from_wxid = ? AND to_wxid = ?", robotCode, chatRoomID, firstWxID, secondWxID).
+		Order("strength DESC, last_seen_at DESC, id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&relationships).Error; err != nil {
+		return nil, err
+	}
+	return relationships, nil
 }

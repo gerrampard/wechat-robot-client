@@ -6,39 +6,42 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"time"
 
-	"wechat-robot-client/utils"
-	"wechat-robot-client/vars"
-
+	"github.com/openai/openai-go/v3"
 	"github.com/redis/go-redis/v9"
-	"github.com/sashabaranov/go-openai"
+
+	"wechat-robot-client/vars"
 )
 
 const (
-	embeddingDimensions    = 1536
 	embeddingCacheDuration = 24 * time.Hour
 	embeddingCachePrefix   = "emb:"
 )
 
 // EmbeddingService 向量化服务
 type EmbeddingService struct {
-	client *openai.Client
-	model  openai.EmbeddingModel
+	client    *openai.Client
+	model     openai.EmbeddingModel
+	dimension int
 }
 
 // NewEmbeddingService 创建向量化服务
-func NewEmbeddingService(baseURL, apiKey, model string) *EmbeddingService {
-	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = utils.NormalizeAIBaseURL(baseURL)
+func NewEmbeddingService(baseURL, apiKey, model string, dimension int) *EmbeddingService {
 	embModel := openai.EmbeddingModel(model)
 	if model == "" {
-		embModel = openai.SmallEmbedding3
+		embModel = openai.EmbeddingModelTextEmbedding3Small
 	}
+	if dimension <= 0 {
+		dimension = 2048
+	}
+	client := newOpenAIClient(apiKey, baseURL)
 	return &EmbeddingService{
-		client: openai.NewClientWithConfig(config),
-		model:  embModel,
+		client:    &client,
+		model:     embModel,
+		dimension: dimension,
 	}
 }
 
@@ -48,10 +51,14 @@ func (s *EmbeddingService) Embed(ctx context.Context, text string) ([]float32, e
 		return cached, nil
 	}
 
-	resp, err := s.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
-		Input:      []string{text},
+	start := time.Now()
+
+	resp, err := s.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
+		Input: openai.EmbeddingNewParamsInputUnion{
+			OfString: openai.String(text),
+		},
 		Model:      s.model,
-		Dimensions: embeddingDimensions,
+		Dimensions: openai.Int(int64(s.dimension)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("embedding failed: %w", err)
@@ -60,8 +67,14 @@ func (s *EmbeddingService) Embed(ctx context.Context, text string) ([]float32, e
 		return nil, fmt.Errorf("empty embedding response")
 	}
 
-	vector := resp.Data[0].Embedding
+	log.Printf("[Embed] embed 接口调用耗时: %v", time.Since(start))
+
+	start = time.Now()
+	vector := float64SliceToFloat32(resp.Data[0].Embedding)
 	s.setCache(ctx, text, vector)
+
+	log.Printf("[Embed] embed 缓存耗时: %v", time.Since(start))
+
 	return vector, nil
 }
 
@@ -71,10 +84,12 @@ func (s *EmbeddingService) EmbedBatch(ctx context.Context, texts []string) ([][]
 		return nil, nil
 	}
 
-	resp, err := s.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
-		Input:      texts,
+	resp, err := s.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
+		Input: openai.EmbeddingNewParamsInputUnion{
+			OfArrayOfStrings: texts,
+		},
 		Model:      s.model,
-		Dimensions: embeddingDimensions,
+		Dimensions: openai.Int(int64(s.dimension)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("batch embedding failed: %w", err)
@@ -82,9 +97,21 @@ func (s *EmbeddingService) EmbedBatch(ctx context.Context, texts []string) ([][]
 
 	results := make([][]float32, len(texts))
 	for i, data := range resp.Data {
-		results[i] = data.Embedding
+		index := i
+		if data.Index >= 0 && int(data.Index) < len(results) {
+			index = int(data.Index)
+		}
+		results[index] = float64SliceToFloat32(data.Embedding)
 	}
 	return results, nil
+}
+
+func float64SliceToFloat32(data []float64) []float32 {
+	result := make([]float32, len(data))
+	for i, v := range data {
+		result[i] = float32(v)
+	}
+	return result
 }
 
 func (s *EmbeddingService) cacheKey(text string) string {

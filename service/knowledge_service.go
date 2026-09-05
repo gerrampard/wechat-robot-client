@@ -96,7 +96,7 @@ func (s *KnowledgeService) AddDocument(ctx context.Context, title, content, sour
 	go func() {
 		bgCtx := context.Background()
 		for _, doc := range docs {
-			vectorID, err := s.vectorStore.IndexKnowledge(bgCtx, vars.RobotRuntime.RobotCode, doc.ID, doc.Content, doc.Title, doc.Category)
+			vectorID, err := s.vectorStore.IndexKnowledge(bgCtx, vars.RobotRuntime.RobotCode, doc.ID, doc.Category, doc.Title, doc.Content)
 			if err != nil {
 				log.Printf("[Knowledge] 向量化文档失败 %d: %v", doc.ID, err)
 				continue
@@ -171,7 +171,7 @@ func (s *KnowledgeService) UpdateDocument(ctx context.Context, id int64, title, 
 	go func() {
 		bgCtx := context.Background()
 		for _, d := range docs {
-			vectorID, err := s.vectorStore.IndexKnowledge(bgCtx, vars.RobotRuntime.RobotCode, d.ID, d.Content, d.Title, d.Category)
+			vectorID, err := s.vectorStore.IndexKnowledge(bgCtx, vars.RobotRuntime.RobotCode, d.ID, d.Category, d.Title, d.Content)
 			if err != nil {
 				log.Printf("[Knowledge] 向量化文档失败 %d: %v", d.ID, err)
 				continue
@@ -236,6 +236,13 @@ func (s *KnowledgeService) SearchKnowledge(ctx context.Context, query, category 
 	return s.vectorStore.SearchKnowledge(ctx, vars.RobotRuntime.RobotCode, query, category, limit)
 }
 
+func (s *KnowledgeService) SearchKnowledgeByCategories(ctx context.Context, query string, categories []string, limit int) ([]ai.VectorSearchResult, error) {
+	if s.vectorStore == nil {
+		return nil, fmt.Errorf("vector store not available")
+	}
+	return s.vectorStore.SearchKnowledgeByCategories(ctx, vars.RobotRuntime.RobotCode, query, categories, limit)
+}
+
 // ReindexAll 重建所有知识库向量索引
 func (s *KnowledgeService) ReindexAll(ctx context.Context) error {
 	page := 1
@@ -256,7 +263,7 @@ func (s *KnowledgeService) ReindexAll(ctx context.Context) error {
 				continue
 			}
 			for _, chunk := range chunks {
-				vectorID, err := s.vectorStore.IndexKnowledge(ctx, vars.RobotRuntime.RobotCode, chunk.ID, chunk.Content, chunk.Title, chunk.Category)
+				vectorID, err := s.vectorStore.IndexKnowledge(ctx, vars.RobotRuntime.RobotCode, chunk.ID, chunk.Category, chunk.Title, chunk.Content)
 				if err != nil {
 					log.Printf("[Knowledge] 重建索引失败 %d: %v", chunk.ID, err)
 					continue
@@ -281,7 +288,7 @@ func splitTextIntoChunks(text string, size, overlap int) []string {
 	}
 
 	// First, try to split by two or more consecutive newlines (paragraphs)
-	re := regexp.MustCompile(`(?m:(\r?\n\s*\r?\n)+)`)
+	re := regexp.MustCompile(`(?:\r?\n[ \t]*){2,}\r?\n`)
 	parts := re.Split(text, -1)
 
 	var chunks []string

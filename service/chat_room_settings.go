@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"wechat-robot-client/interface/settings"
@@ -75,11 +77,11 @@ func (s *ChatRoomSettingsService) GetAIConfig() settings.AIConfig {
 		if s.globalSettings.ImageAISettings != nil {
 			aiConfig.ImageAISettings = s.globalSettings.ImageAISettings
 		}
+		if s.globalSettings.TTSModel != nil && *s.globalSettings.TTSModel != "" {
+			aiConfig.TTSModel = *s.globalSettings.TTSModel
+		}
 		if s.globalSettings.TTSSettings != nil {
 			aiConfig.TTSSettings = s.globalSettings.TTSSettings
-		}
-		if s.globalSettings.LTTSSettings != nil {
-			aiConfig.LTTSSettings = s.globalSettings.LTTSSettings
 		}
 	}
 	if s.chatRoomSettings != nil {
@@ -104,11 +106,11 @@ func (s *ChatRoomSettingsService) GetAIConfig() settings.AIConfig {
 		if s.chatRoomSettings.ImageAISettings != nil {
 			aiConfig.ImageAISettings = s.chatRoomSettings.ImageAISettings
 		}
+		if s.chatRoomSettings.TTSModel != nil && *s.chatRoomSettings.TTSModel != "" {
+			aiConfig.TTSModel = *s.chatRoomSettings.TTSModel
+		}
 		if s.chatRoomSettings.TTSSettings != nil {
 			aiConfig.TTSSettings = s.chatRoomSettings.TTSSettings
-		}
-		if s.chatRoomSettings.LTTSSettings != nil {
-			aiConfig.LTTSSettings = s.chatRoomSettings.LTTSSettings
 		}
 	}
 	aiConfig.BaseURL = utils.NormalizeAIBaseURL(aiConfig.BaseURL)
@@ -152,6 +154,27 @@ func (s *ChatRoomSettingsService) IsShortVideoParsingEnabled() bool {
 	return false
 }
 
+func (s *ChatRoomSettingsService) logAITrigger(reason, triggerWord, messageContent string) {
+	if s.Message == nil {
+		return
+	}
+	contentPreview := strings.ReplaceAll(strings.TrimSpace(messageContent), "\n", `\n`)
+	contentRunes := []rune(contentPreview)
+	if len(contentRunes) > 80 {
+		contentPreview = string(contentRunes[:80]) + "..."
+	}
+	log.Printf("[AITrigger] reason=%s trigger_word=%q msg_id=%d from=%s sender=%s is_at_me=%t app_msg_type=%d content=%q",
+		reason,
+		triggerWord,
+		s.Message.MsgId,
+		s.Message.FromWxID,
+		s.Message.SenderWxID,
+		s.Message.IsAtMe,
+		s.Message.AppMsgType,
+		contentPreview,
+	)
+}
+
 func (s *ChatRoomSettingsService) IsAITrigger() bool {
 	messageContent := s.Message.Content
 	if s.Message.AppMsgType == model.AppMsgTypequote {
@@ -167,6 +190,7 @@ func (s *ChatRoomSettingsService) IsAITrigger() bool {
 			// 如果是 @所有人，则不处理
 			return false
 		}
+		s.logAITrigger("mentioned", "", messageContent)
 		return true
 	}
 	if s.chatRoomSettings == nil {
@@ -176,16 +200,28 @@ func (s *ChatRoomSettingsService) IsAITrigger() bool {
 		if s.globalSettings.ChatAIEnabled == nil || !*s.globalSettings.ChatAIEnabled {
 			return false
 		}
-		return *s.globalSettings.ChatAITrigger != "" && strings.HasPrefix(messageContent, *s.globalSettings.ChatAITrigger)
+		if *s.globalSettings.ChatAITrigger != "" && strings.HasPrefix(messageContent, *s.globalSettings.ChatAITrigger) {
+			s.logAITrigger("trigger_word.global", *s.globalSettings.ChatAITrigger, messageContent)
+			return true
+		}
+		return false
 	}
 	if s.chatRoomSettings.ChatAIEnabled == nil || !*s.chatRoomSettings.ChatAIEnabled {
 		return false
 	}
 	if s.chatRoomSettings.ChatAITrigger != nil && *s.chatRoomSettings.ChatAITrigger != "" {
-		return *s.chatRoomSettings.ChatAITrigger != "" && strings.HasPrefix(messageContent, *s.chatRoomSettings.ChatAITrigger)
+		if strings.HasPrefix(messageContent, *s.chatRoomSettings.ChatAITrigger) {
+			s.logAITrigger("trigger_word.chat_room", *s.chatRoomSettings.ChatAITrigger, messageContent)
+			return true
+		}
+		return false
 	}
-	return s.globalSettings != nil && s.globalSettings.ChatAITrigger != nil && *s.globalSettings.ChatAITrigger != "" &&
-		strings.HasPrefix(messageContent, *s.globalSettings.ChatAITrigger)
+	if s.globalSettings != nil && s.globalSettings.ChatAITrigger != nil && *s.globalSettings.ChatAITrigger != "" &&
+		strings.HasPrefix(messageContent, *s.globalSettings.ChatAITrigger) {
+		s.logAITrigger("trigger_word.global_fallback", *s.globalSettings.ChatAITrigger, messageContent)
+		return true
+	}
+	return false
 }
 
 func (s *ChatRoomSettingsService) GetAITriggerWord() string {
@@ -298,8 +334,114 @@ func (s *ChatRoomSettingsService) GetAllEnableNews() ([]*model.ChatRoomSettings,
 }
 
 func (s *ChatRoomSettingsService) SaveChatRoomSettings(data *model.ChatRoomSettings) error {
+	if err := s.normalizeKnowledgeCategories(data); err != nil {
+		return err
+	}
+	if err := s.normalizeMemoryExtractionBlacklist(data); err != nil {
+		return err
+	}
 	if data.ID == 0 {
 		return s.crsRepo.Create(data)
 	}
 	return s.crsRepo.Update(data)
+}
+
+func normalizeKnowledgeCategoryCodes(codes []string) []string {
+	return normalizeStringList(codes)
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	return normalized
+}
+
+func (s *ChatRoomSettingsService) normalizeKnowledgeCategories(data *model.ChatRoomSettings) error {
+	if data == nil || data.KnowledgeCategories == nil {
+		return nil
+	}
+
+	codes, err := data.GetKnowledgeCategoryCodes()
+	if err != nil {
+		return fmt.Errorf("knowledge_categories 格式错误: %w", err)
+	}
+
+	normalized := normalizeKnowledgeCategoryCodes(codes)
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return fmt.Errorf("序列化 knowledge_categories 失败: %w", err)
+	}
+	data.KnowledgeCategories = payload
+
+	if len(normalized) == 0 {
+		return nil
+	}
+
+	categoryRepo := repository.NewKnowledgeCategoryRepo(s.ctx, vars.DB)
+	categories, err := categoryRepo.GetByCodes(normalized)
+	if err != nil {
+		return fmt.Errorf("查询知识库分类失败: %w", err)
+	}
+
+	categoryByCode := make(map[string]*model.KnowledgeCategory, len(categories))
+	for _, category := range categories {
+		categoryByCode[category.Code] = category
+	}
+
+	missingCodes := make([]string, 0)
+	unsupportedCodes := make([]string, 0)
+	for _, code := range normalized {
+		category, ok := categoryByCode[code]
+		if !ok {
+			missingCodes = append(missingCodes, code)
+			continue
+		}
+		if category.Type != model.KnowledgeCategoryTypeText {
+			unsupportedCodes = append(unsupportedCodes, code)
+		}
+	}
+
+	if len(missingCodes) > 0 {
+		return fmt.Errorf("以下知识库不存在: %s", strings.Join(missingCodes, ", "))
+	}
+	if len(unsupportedCodes) > 0 {
+		return fmt.Errorf("以下知识库不是文本知识库，暂不支持绑定到群聊: %s", strings.Join(unsupportedCodes, ", "))
+	}
+
+	return nil
+}
+
+func (s *ChatRoomSettingsService) normalizeMemoryExtractionBlacklist(data *model.ChatRoomSettings) error {
+	if data == nil || data.MemoryExtractionBlacklist == nil {
+		return nil
+	}
+
+	wxIDs, err := data.GetMemoryExtractionBlacklist()
+	if err != nil {
+		return fmt.Errorf("memory_extraction_blacklist 格式错误: %w", err)
+	}
+
+	payload, err := json.Marshal(normalizeStringList(wxIDs))
+	if err != nil {
+		return fmt.Errorf("序列化 memory_extraction_blacklist 失败: %w", err)
+	}
+	data.MemoryExtractionBlacklist = payload
+
+	return nil
 }

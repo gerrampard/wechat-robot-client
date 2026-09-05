@@ -5,7 +5,6 @@ import (
 
 	"wechat-robot-client/controller"
 	"wechat-robot-client/middleware"
-	"wechat-robot-client/vars"
 )
 
 var chatHistoryCtl *controller.ChatHistory
@@ -29,6 +28,9 @@ var pprofProxyCtl *controller.PprofProxy
 var skillCtl *controller.SkillController
 var knowledgeCtl *controller.Knowledge
 var knowledgeCategoryCtl *controller.KnowledgeCategory
+var systemPromptCtl *controller.SystemPrompt
+var officialAccountCtx *controller.OfficialAccount
+var wxAppCtl *controller.WXApp
 
 func initController() {
 	chatHistoryCtl = controller.NewChatHistoryController()
@@ -47,11 +49,14 @@ func initController() {
 	systemSettingsCtl = controller.NewSystemSettingsController()
 	ossSettingsCtl = controller.NewOSSSettingsController()
 	mcpServerCtl = controller.NewMCPController()
-	pprofProxyCtl = controller.NewPprofProxyController(vars.PprofProxyURL)
+	pprofProxyCtl = controller.NewPprofProxyController()
 	probeCtl = controller.NewProbeController()
 	skillCtl = controller.NewSkillController()
 	knowledgeCtl = controller.NewKnowledgeController()
 	knowledgeCategoryCtl = controller.NewKnowledgeCategoryController()
+	systemPromptCtl = controller.NewSystemPromptController()
+	officialAccountCtx = controller.NewOfficialAccountController()
+	wxAppCtl = controller.NewWXAppController()
 }
 
 func RegisterRouter(r *gin.Engine) error {
@@ -84,6 +89,7 @@ func RegisterRouter(r *gin.Engine) error {
 	api.POST("/robot/login/data62-sms-again", loginCtl.LoginData62SMSAgain)
 	api.POST("/robot/login/data62-sms-verify", loginCtl.LoginData62SMSVerify)
 	api.POST("/robot/login/a16", loginCtl.LoginA16Data)
+	api.POST("/robot/login/set-proxy", loginCtl.SetProxy)
 	api.DELETE("/robot/logout", loginCtl.Logout)
 
 	// 联系人相关接口
@@ -111,12 +117,11 @@ func RegisterRouter(r *gin.Engine) error {
 	api.DELETE("/robot/chat-room/members", chatRoomCtl.GroupDelChatRoomMember)
 	api.DELETE("/robot/chat-room/quit", chatRoomCtl.GroupQuit)
 
-	api.GET("/robot/chat/history", chatHistoryCtl.GetChatHistory)
-
 	// 消息相关接口
 	api.POST("/robot/message/revoke", messageCtl.MessageRevoke)
 	api.POST("/robot/message/send/text", messageCtl.SendTextMessage)
 	api.POST("/robot/message/send/longtext", messageCtl.SendLongTextMessage)
+	api.POST("/robot/message/send/masssend", messageCtl.SendGroupMassMsgText)
 	api.POST("/robot/message/send/image", messageCtl.SendImageMessage)
 	api.POST("/robot/message/send/image/stream", messageCtl.SendImageMessageStream)
 	api.POST("/robot/message/send/image/url", messageCtl.SendImageMessageByRemoteURL)
@@ -128,6 +133,7 @@ func RegisterRouter(r *gin.Engine) error {
 	api.POST("/robot/message/send/voice/local", messageCtl.SendVoiceMessageByLocalPath)
 	api.POST("/robot/message/send/music", messageCtl.SendMusicMessage)
 	api.POST("/robot/message/send/app", messageCtl.SendAppMessage)
+	api.POST("/robot/message/send/emoji", messageCtl.SendEmojiMessage)
 	api.POST("/robot/message/send/file", messageCtl.SendFileMessage)
 	api.POST("/robot/message/send/file/local", messageCtl.SendFileMessageByLocalPath)
 
@@ -163,6 +169,13 @@ func RegisterRouter(r *gin.Engine) error {
 	api.DELETE("/robot/skill/uninstall", skillCtl.UninstallSkill)
 	api.POST("/robot/skill/env-vars", skillCtl.SetSkillEnvVars)
 
+	// 系统提示词管理接口
+	api.GET("/robot/system-prompts", systemPromptCtl.List)
+	api.GET("/robot/system-prompt", systemPromptCtl.Get)
+	api.POST("/robot/system-prompt", systemPromptCtl.Create)
+	api.PUT("/robot/system-prompt", systemPromptCtl.Update)
+	api.DELETE("/robot/system-prompt", systemPromptCtl.Delete)
+
 	// 知识库分类管理接口
 	api.GET("/robot/knowledge/categories", knowledgeCategoryCtl.List)
 	api.POST("/robot/knowledge/category", knowledgeCategoryCtl.Create)
@@ -178,9 +191,6 @@ func RegisterRouter(r *gin.Engine) error {
 	api.GET("/robot/knowledge/documents", knowledgeCtl.ListDocuments)
 	api.POST("/robot/knowledge/search", knowledgeCtl.SearchKnowledge)
 	api.POST("/robot/knowledge/reindex", knowledgeCtl.ReindexAll)
-	api.POST("/robot/memory", knowledgeCtl.SaveMemory)
-	api.POST("/robot/memory/search", knowledgeCtl.SearchMemory)
-	api.DELETE("/robot/memory", knowledgeCtl.DeleteMemory)
 
 	// 图片知识库接口
 	api.POST("/robot/image-knowledge/document", knowledgeCtl.AddImageDocument)
@@ -190,17 +200,20 @@ func RegisterRouter(r *gin.Engine) error {
 	api.POST("/robot/image-knowledge/search/image", knowledgeCtl.SearchImageByImage)
 	api.POST("/robot/image-knowledge/reindex", knowledgeCtl.ReindexAllImages)
 
+	// 全量重建向量索引
+	api.POST("/robot/vector/reindex-all", knowledgeCtl.ReindexAllVectors)
+
 	api.GET("/robot/chat/image/download", attachDownloadCtl.DownloadImage)
 	api.GET("/robot/chat/voice/download", attachDownloadCtl.DownloadVoice)
 	api.GET("/robot/chat/file/download", attachDownloadCtl.DownloadFile)
 	api.GET("/robot/chat/video/download", attachDownloadCtl.DownloadVideo)
+	api.POST("/robot/chat/media/upload", attachDownloadCtl.UploadMedia)
+	api.GET("/robot/chat/history", chatHistoryCtl.GetChatHistory)
 
 	api.GET("/robot/global-settings", globalSettingsCtl.GetGlobalSettings)
 	api.POST("/robot/global-settings", globalSettingsCtl.SaveGlobalSettings)
-
 	api.GET("/robot/friend-settings", friendSettingsCtl.GetFriendSettings)
 	api.POST("/robot/friend-settings", friendSettingsCtl.SaveFriendSettings)
-
 	api.GET("/robot/chat-room-settings", chatRoomSettingsCtl.GetChatRoomSettings)
 	api.POST("/robot/chat-room-settings", chatRoomSettingsCtl.SaveChatRoomSettings)
 
@@ -226,7 +239,10 @@ func RegisterRouter(r *gin.Engine) error {
 	api.POST("/wechat-client/:wechatID/logout", wechatServerCallbackCtl.LogoutCallback)
 
 	// 微信小程序相关接口
-	api.POST("/robot/wxapp/qrcode-auth-login", controller.NewWXAppController().WxappQrcodeAuthLogin)
+	api.POST("/robot/wxapp/qrcode-auth-login", wxAppCtl.WxappQrcodeAuthLogin)
+
+	// 公众号相关接口
+	api.POST("/robot/official-account/get-app-msg-ext", officialAccountCtx.GetAppMsgExt)
 
 	// Pprof 代理接口 - 代理项目B的pprof监控
 	pprofGroup := api.Group("/robot/pprof")

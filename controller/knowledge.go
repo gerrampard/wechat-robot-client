@@ -1,10 +1,14 @@
 package controller
 
 import (
+	"context"
 	"errors"
+	"log"
 	"wechat-robot-client/dto"
-	"wechat-robot-client/model"
 	"wechat-robot-client/pkg/appx"
+	"wechat-robot-client/pkg/qdrantx"
+	"wechat-robot-client/service"
+	"wechat-robot-client/utils"
 	"wechat-robot-client/vars"
 
 	"github.com/gin-gonic/gin"
@@ -160,70 +164,6 @@ func (k *Knowledge) ReindexAll(c *gin.Context) {
 	resp.ToResponse("reindex started")
 }
 
-// --- 记忆管理接口 ---
-
-// SaveMemory 手动保存记忆
-func (k *Knowledge) SaveMemory(c *gin.Context) {
-	resp := appx.NewResponse(c)
-	var req dto.SaveMemoryRequest
-	if ok, _ := appx.BindAndValid(c, &req); !ok {
-		resp.ToErrorResponse(errors.New("参数错误"))
-		return
-	}
-	if req.Importance <= 0 {
-		req.Importance = 5
-	}
-	memory := &model.Memory{
-		ContactWxID: req.ContactWxID,
-		ChatRoomID:  req.ChatRoomID,
-		Type:        model.MemoryType(req.Type),
-		Key:         req.Key,
-		Content:     req.Content,
-		Importance:  req.Importance,
-	}
-	err := vars.MemoryService.SaveManualMemory(c.Request.Context(), memory)
-	if err != nil {
-		resp.ToErrorResponse(err)
-		return
-	}
-	resp.ToResponse(memory)
-}
-
-// SearchMemory 搜索记忆
-func (k *Knowledge) SearchMemory(c *gin.Context) {
-	resp := appx.NewResponse(c)
-	var req dto.SearchMemoryRequest
-	if ok, _ := appx.BindAndValid(c, &req); !ok {
-		resp.ToErrorResponse(errors.New("参数错误"))
-		return
-	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
-	memories, err := vars.MemoryService.GetRelevantMemories(c.Request.Context(), req.ContactWxID, req.Query, req.Limit)
-	if err != nil {
-		resp.ToErrorResponse(err)
-		return
-	}
-	resp.ToResponse(memories)
-}
-
-// DeleteMemory 删除记忆
-func (k *Knowledge) DeleteMemory(c *gin.Context) {
-	resp := appx.NewResponse(c)
-	var req dto.DeleteMemoryRequest
-	if ok, _ := appx.BindAndValid(c, &req); !ok {
-		resp.ToErrorResponse(errors.New("参数错误"))
-		return
-	}
-	err := vars.MemoryService.DeleteMemory(c.Request.Context(), req.ID)
-	if err != nil {
-		resp.ToErrorResponse(err)
-		return
-	}
-	resp.ToResponse(nil)
-}
-
 // --- 图片知识库接口 ---
 
 // AddImageDocument 添加图片知识库文档
@@ -355,4 +295,62 @@ func (k *Knowledge) ReindexAllImages(c *gin.Context) {
 		}
 	}()
 	resp.ToResponse("image reindex started")
+}
+
+// ReindexAllVectors 全量重建向量索引
+func (k *Knowledge) ReindexAllVectors(c *gin.Context) {
+	resp := appx.NewResponse(c)
+
+	if vars.QdrantClient == nil {
+		resp.ToErrorResponse(errors.New("Qdrant 未初始化"))
+		return
+	}
+	if vars.KnowledgeService == nil {
+		resp.ToErrorResponse(errors.New("RAG 服务未初始化，请先完成 AI 配置"))
+		return
+	}
+
+	ctx := context.Background()
+	globalSettings, err := service.NewGlobalSettingsService(ctx).GetGlobalSettings()
+	if err != nil || globalSettings == nil {
+		resp.ToErrorResponse(errors.New("无法读取全局配置"))
+		return
+	}
+
+	textDim := uint64(2048)
+	if v := utils.PtrIntValue(globalSettings.TextEmbeddingDimension); v > 0 {
+		textDim = uint64(v)
+	}
+
+	go func() {
+		bgCtx := context.Background()
+		log.Printf("[ReindexAll] 开始全量重建向量索引，文本维度 %d", textDim)
+
+		// 1. 删除并重建文本集合
+		textCollections := []string{
+			qdrantx.CollectionMemories,
+			qdrantx.CollectionKnowledge,
+		}
+		for _, col := range textCollections {
+			if err := vars.QdrantClient.DeleteCollection(bgCtx, col); err != nil {
+				log.Printf("[ReindexAll] 删除集合 %s 失败: %v", col, err)
+				return
+			}
+			if err := vars.QdrantClient.InitCollection(bgCtx, col, textDim); err != nil {
+				log.Printf("[ReindexAll] 重建集合 %s 失败: %v", col, err)
+				return
+			}
+		}
+		log.Printf("[ReindexAll] 文本集合重建完成")
+
+		// 2. 重建知识库向量
+		if err := vars.KnowledgeService.ReindexAll(bgCtx); err != nil {
+			log.Printf("[ReindexAll] 知识库重建失败: %v", err)
+		}
+		log.Printf("[ReindexAll] 知识库向量重建完成")
+
+		log.Printf("[ReindexAll] 全量重建完成")
+	}()
+
+	resp.ToResponse("reindex-all started")
 }

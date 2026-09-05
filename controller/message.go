@@ -76,6 +76,22 @@ func (m *Message) SendLongTextMessage(c *gin.Context) {
 	resp.ToResponse(nil)
 }
 
+// SendGroupMassMsgText 文本消息群发接口
+func (m *Message) SendGroupMassMsgText(c *gin.Context) {
+	var req dto.SendGroupMassMsgTextRequest
+	resp := appx.NewResponse(c)
+	if ok, err := appx.BindAndValid(c, &req); !ok || err != nil {
+		resp.ToErrorResponse(errors.New("参数错误"))
+		return
+	}
+	err := service.NewMessageService(c).SendGroupMassMsgText(req.ToWxIDs, req.Content)
+	if err != nil {
+		resp.ToErrorResponse(err)
+		return
+	}
+	resp.ToResponse(nil)
+}
+
 func (m *Message) SendImageMessage(c *gin.Context) {
 	resp := appx.NewResponse(c)
 	// 获取表单文件
@@ -132,7 +148,7 @@ func (m *Message) SendImageMessageStream(c *gin.Context) {
 	defer file.Close()
 
 	if fileHeader.Size > vars.UploadImageChunkSize {
-		resp.ToErrorResponse(errors.New("单个分片大小不能超过64KB"))
+		resp.ToErrorResponse(errors.New("单个分片大小不能超过200KB"))
 		return
 	}
 
@@ -339,6 +355,21 @@ func (m *Message) SendAppMessage(c *gin.Context) {
 	resp.ToResponse(nil)
 }
 
+func (m *Message) SendEmojiMessage(c *gin.Context) {
+	var req dto.SendEmojiMessageRequest
+	resp := appx.NewResponse(c)
+	if ok, err := appx.BindAndValid(c, &req); !ok || err != nil {
+		resp.ToErrorResponse(errors.New("参数错误"))
+		return
+	}
+	err := service.NewMessageService(c).SendEmoji(req.ToWxid, req.Md5, req.TotalLen)
+	if err != nil {
+		resp.ToErrorResponse(err)
+		return
+	}
+	resp.ToResponse(nil)
+}
+
 func (m *Message) SendMusicMessage(c *gin.Context) {
 	var req dto.SendMusicMessageRequest
 	resp := appx.NewResponse(c)
@@ -365,7 +396,7 @@ func (m *Message) SendFileMessage(c *gin.Context) {
 	defer file.Close()
 
 	if fileHeader.Size > vars.UploadFileChunkSize {
-		resp.ToErrorResponse(errors.New("单个分片大小不能超过50KB"))
+		resp.ToErrorResponse(errors.New("单个分片大小不能超过200KB"))
 		return
 	}
 

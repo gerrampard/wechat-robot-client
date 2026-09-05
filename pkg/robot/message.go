@@ -98,6 +98,44 @@ type BrandList struct {
 	Ver     string   `xml:"ver,attr"`
 }
 
+type XMLEmojiMessage struct {
+	XMLName xml.Name     `xml:"msg"`
+	Emoji   EmojiMessage `xml:"emoji"`
+}
+
+type EmojiMessage struct {
+	FromUserName      string `xml:"fromusername,attr"`
+	ToUserName        string `xml:"tousername,attr"`
+	Type              int    `xml:"type,attr"`
+	IDBuffer          string `xml:"idbuffer,attr"`
+	MD5               string `xml:"md5,attr"`
+	Len               int    `xml:"len,attr"`
+	ProductID         string `xml:"productid,attr"`
+	AndroidMD5        string `xml:"androidmd5,attr"`
+	AndroidLen        int    `xml:"androidlen,attr"`
+	S60v3MD5          string `xml:"s60v3md5,attr"`
+	S60v3Len          int    `xml:"s60v3len,attr"`
+	S60v5MD5          string `xml:"s60v5md5,attr"`
+	S60v5Len          int    `xml:"s60v5len,attr"`
+	CDNUrl            string `xml:"cdnurl,attr"`
+	DesignerID        string `xml:"designerid,attr"`
+	ThumbUrl          string `xml:"thumburl,attr"`
+	EncryptUrl        string `xml:"encrypturl,attr"`
+	AESKey            string `xml:"aeskey,attr"`
+	ExternUrl         string `xml:"externurl,attr"`
+	ExternMD5         string `xml:"externmd5,attr"`
+	Width             int    `xml:"width,attr"`
+	Height            int    `xml:"height,attr"`
+	TpUrl             string `xml:"tpurl,attr"`
+	TpAuthKey         string `xml:"tpauthkey,attr"`
+	AttachedText      string `xml:"attachedtext,attr"`
+	AttachedTextColor string `xml:"attachedtextcolor,attr"`
+	LensID            string `xml:"lensid,attr"`
+	EmojiAttr         string `xml:"emojiattr,attr"`
+	LinkID            string `xml:"linkid,attr"`
+	Desc              string `xml:"desc,attr"`
+}
+
 type XmlMessage struct {
 	XMLName      xml.Name   `xml:"msg"`
 	AppMsg       AppMessage `xml:"appmsg"`
@@ -140,6 +178,7 @@ type AppMessage struct {
 	ReferMsg          ReferMessage   `xml:"refermsg"`
 	WcPayInfo         WcPayInfo      `xml:"wcpayinfo"`
 	Emoji             EmojiInfo      `xml:"emoji"`
+	EcsGift           *EcsGift       `xml:"ecsgift,omitempty"`
 }
 
 type MusicShareItem struct {
@@ -203,6 +242,24 @@ type ReferMessage struct {
 	Content     string `xml:"content"`
 	MsgSource   string `xml:"msgsource"`
 	CreateTime  int64  `xml:"createtime"`
+}
+
+type MessageSource struct {
+	XMLName     xml.Name             `xml:"msgsource"`
+	AtUserList  string               `xml:"atuserlist"`
+	ALNode      MessageSourceALNode  `xml:"alnode"`
+	Silence     int                  `xml:"silence"`
+	MemberCount int                  `xml:"membercount"`
+	Signature   string               `xml:"signature"`
+	TmpNode     MessageSourceTmpNode `xml:"tmp_node"`
+}
+
+type MessageSourceALNode struct {
+	FR int `xml:"fr"`
+}
+
+type MessageSourceTmpNode struct {
+	PublisherID string `xml:"publisher-id"`
 }
 
 type SystemMessage struct {
@@ -369,13 +426,14 @@ type MsgSendVideoStreamRequest struct {
 }
 
 type MsgSendVideoResponse struct {
-	BaseResponse
-	Msgid         int64  `json:"msgId"`
-	ClientMsgId   string `json:"clientMsgId"`
-	ThumbStartPos int64  `json:"thumbStartPos"`
-	VideoStartPos int64  `json:"videoStartPos"`
-	NewMsgId      int64  `json:"newMsgId"`
-	ActionFlag    int    `json:"actionFlag"`
+	BaseResponse  *BaseResponse `json:"BaseResponse"`
+	Msgid         int64         `json:"msgId"`
+	ClientMsgId   string        `json:"clientMsgId"`
+	ThumbStartPos int64         `json:"thumbStartPos"`
+	VideoStartPos int64         `json:"videoStartPos"`
+	NewMsgId      int64         `json:"newMsgId"`
+	ActionFlag    int           `json:"actionFlag"`
+	Aeskey        string        `json:"aeskey"`
 }
 
 type MsgSendVoiceRequest struct {
@@ -423,6 +481,11 @@ type SendAppResponse struct {
 	NewMsgId     int64  `json:"newMsgId"`
 	MsgSource    string `json:"msgSource"`
 	Content      string `json:"content"`
+}
+
+type GetAppMsgExtRequest struct {
+	Wxid string `json:"Wxid"`
+	Url  string `json:"Url"`
 }
 
 type SongInfo struct {
@@ -571,4 +634,108 @@ type SendFileMessageResponse struct {
 	StartPos        *uint32       `json:"startPos,omitempty"`
 	DataLen         *uint32       `json:"dataLen,omitempty"`
 	CreateTime      *uint64       `json:"createTime,omitempty"`
+}
+
+type EcsGift struct {
+	SubType               int                 `xml:"subtype"`
+	GiftMsgID             string              `xml:"giftmsgid"`
+	WishMessage           string              `xml:"wishmessage"`
+	TailText              string              `xml:"tailtext"`
+	TakeMethod            int                 `xml:"takemethod"`
+	GiftTitle             string              `xml:"gifttitle"`
+	GiftTitleTemplate     string              `xml:"gifttitletemplate"`
+	RecvUsername          string              `xml:"recvusername"`
+	EllipsisIndex         int                 `xml:"ellipsisindex"`
+	Gifts                 EcsGiftList         `xml:"gifts"`
+	JumpInfo              EcsGiftJumpInfo     `xml:"jumpinfo"`
+	WishImgInfo           EcsGiftWishImgInfo  `xml:"wishimginfo"`
+	DisableReceive        string              `xml:"disable_receive"`
+	GiftSourceName        string              `xml:"giftsourcename"`
+	GiftCover             EcsGiftCover        `xml:"giftcover"`
+	DrawTimeWording       string              `xml:"drawtimewording"`
+	LotteryMethod         string              `xml:"lotterymethod"`
+	GiftAnimationMaterial EcsGiftAnimMaterial `xml:"giftanimationmaterial"`
+	AppMsgSign            string              `xml:"appmsg_sign"`
+}
+
+type EcsGiftList struct {
+	Gifts []EcsGiftItem `xml:"gift"`
+}
+
+type EcsGiftItem struct {
+	OrderID             string `xml:"orderid"`
+	SkuImgURL           string `xml:"skuimgurl"`
+	SkuTitle            string `xml:"skutitle"`
+	SkuSaleParams       string `xml:"skusaleparams"`
+	SkuPrice            int    `xml:"skuprice"`
+	GiftStatus          int    `xml:"giftstatus"`
+	IsSkuChange         int    `xml:"isskuchange"`
+	BgStartColor        string `xml:"bgstartcolor"`
+	BgEndColor          string `xml:"bgendcolor"`
+	StatusWording       string `xml:"statuswording"`
+	StatusStyle         int    `xml:"statusstyle"`
+	StatusVersion       int    `xml:"statusversion"`
+	DetailStatusWording string `xml:"detailstatuswording"`
+	PresentCntWording   string `xml:"presentcntwording"`
+	DeliveryMethod      int    `xml:"delivery_method"`
+}
+
+type EcsGiftJumpInfo struct {
+	JumpBizType  string             `xml:"jumpbiztype"`
+	MiniAppInfo  EcsGiftMiniAppInfo `xml:"miniappinfo"`
+	LiteAppInfo  EcsGiftLiteAppInfo `xml:"liteappinfo"`
+	Html5Info    EcsGiftHtml5Info   `xml:"html5info"`
+	JumpPriority string             `xml:"jumppriority"`
+	NativeInfo   EcsGiftNativeInfo  `xml:"nativeinfo"`
+}
+
+type EcsGiftMiniAppInfo struct {
+	AppID       string `xml:"appid"`
+	AppUsername string `xml:"appusername"`
+	Path        string `xml:"path"`
+	Scene       string `xml:"scene"`
+	SceneNote   string `xml:"scenenote"`
+	VersionType string `xml:"versiontype"`
+}
+
+type EcsGiftLiteAppInfo struct {
+	AppID      string `xml:"appid"`
+	Path       string `xml:"path"`
+	Query      string `xml:"query"`
+	DefaultURL string `xml:"defaulturl"`
+}
+
+type EcsGiftHtml5Info struct {
+	URL string `xml:"url"`
+}
+
+type EcsGiftNativeInfo struct {
+	NativeURI string `xml:"nativeuri"`
+	Params    string `xml:"params"`
+}
+
+type EcsGiftWishImgInfo struct {
+	FileID        string `xml:"fileid"`
+	AesKey        string `xml:"aeskey"`
+	Width         string `xml:"width"`
+	Height        string `xml:"height"`
+	PickArgbColor string `xml:"pickargbcolor"`
+}
+
+type EcsGiftCover struct {
+	MsgCover         string `xml:"msgcover"`
+	BoxOuterCover    string `xml:"boxoutercover"`
+	BoxInnerCover    string `xml:"boxinnercover"`
+	NormalCover      string `xml:"normalcover"`
+	VideoCover       string `xml:"videocover"`
+	VideoRecvCover   string `xml:"videorecvcover"`
+	VideoNormalCover string `xml:"videonomalcover"`
+}
+
+type EcsGiftAnimMaterial struct {
+	FrontPageResName      string `xml:"frontpagresname"`
+	BackgroundPageResName string `xml:"backgroudpagresname"`
+	MBBasicItemType       string `xml:"mbbasicitemtype"`
+	MBFlyItemType         string `xml:"mbflyitemtype"`
+	MBMiniVersion         string `xml:"mbminiversion"`
 }

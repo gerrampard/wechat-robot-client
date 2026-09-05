@@ -3,7 +3,9 @@ package robot
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"wechat-robot-client/model"
+	robotXMLTemplate "wechat-robot-client/pkg/templates/robot"
 )
 
 type Robot struct {
@@ -150,28 +153,6 @@ func (r *Robot) Login(loginType string, isPretender bool) (loginData LoginRespon
 	// 二维码登陆
 	loginData, err = r.GetQrCode(loginType, false)
 	return
-}
-
-func (r *Robot) XmlFastDecoder(xmlStr, target string) string {
-	decoder := xml.NewDecoder(strings.NewReader(xmlStr))
-	for {
-		tok, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return ""
-		}
-		switch el := tok.(type) {
-		case xml.StartElement:
-			if el.Name.Local == target {
-				var content string
-				decoder.DecodeElement(&content, &el)
-				return content
-			}
-		}
-	}
-	return ""
 }
 
 func (r *Robot) XmlDecoder(xmlStr string, result any) error {
@@ -495,6 +476,13 @@ func (r *Robot) SendAppMessage(toWxID string, appMsgType int, appMsgXml string) 
 	return
 }
 
+func (r *Robot) GetAppMsgExt(url string) (string, error) {
+	return r.Client.GetAppMsgExt(GetAppMsgExtRequest{
+		Wxid: r.WxID,
+		Url:  url,
+	})
+}
+
 // 发送图片信息
 func (r *Robot) MsgUploadImg(toWxID string, image []byte) (MsgUploadImgResponse, error) {
 	base64Str := base64.StdEncoding.EncodeToString(image)
@@ -508,10 +496,17 @@ func (r *Robot) MsgUploadImg(toWxID string, image []byte) (MsgUploadImgResponse,
 // 分片发送图片信息
 func (r *Robot) SendImageMessageStream(req SendImageMessageStreamRequest, file io.Reader, fileHeader *multipart.FileHeader) (*MsgUploadImgResponse, error) {
 	req.Wxid = r.WxID
-	imageMessage, err := r.Client.SendImageMessageStream(req, file, fileHeader)
+
+	// 读取数据到内存，确保重试时可以重新读取
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	imageMessage, err := r.Client.SendImageMessageStream(req, bytes.NewReader(data), fileHeader)
 	if err != nil {
 		for range 3 {
-			imageMessage, err = r.Client.SendImageMessageStream(req, file, fileHeader)
+			imageMessage, err = r.Client.SendImageMessageStream(req, bytes.NewReader(data), fileHeader)
 			if err == nil {
 				break
 			}
@@ -726,7 +721,7 @@ func (r *Robot) MsgSendVideoFromLocal(toWxID, tempFilePath string) (videoMessage
 	videoTotalLen := videoInfo.Size()
 
 	// 分片上传视频缩略图
-	const chunkSize = int64(50000)
+	const chunkSize = int64(200 * 1000) // 200 KB
 	thumbFile, err = os.Open(thumbFile.Name())
 	if err != nil {
 		return nil, fmt.Errorf("打开缩略图文件失败: %w", err)
@@ -808,6 +803,8 @@ func (r *Robot) MsgSendVideoFromLocal(toWxID, tempFilePath string) (videoMessage
 			retryErr := err
 			for range 3 {
 				time.Sleep(200 * time.Millisecond)
+				// chunkReader 已被上次请求读完，必须 reset 后才能重试
+				chunkReader.Seek(0, io.SeekStart)
 				videoMessage, retryErr = r.Client.MsgSendVideoStream(MsgSendVideoStreamRequest{
 					Wxid:          r.WxID,
 					ToWxid:        toWxID,
@@ -823,7 +820,7 @@ func (r *Robot) MsgSendVideoFromLocal(toWxID, tempFilePath string) (videoMessage
 				}
 			}
 			if retryErr != nil {
-				return nil, fmt.Errorf("上传视频分片失败(重试3次后仍失败): %w", retryErr)
+				return nil, retryErr
 			}
 		}
 		videoStartPos += currentChunkSize
@@ -976,7 +973,11 @@ func (r *Robot) MsgSendVoice(toWxID string, voice []byte, voiceExt string) (voic
 		silkFilename := strings.Replace(pcmFile.Name(), ".pcm", ".silk", 1)
 		defer os.Remove(silkFilename)
 
-		cmd = exec.Command("/usr/local/bin/silk/encoder", pcmFile.Name(), silkFilename, "-tencent")
+		cmd = exec.Command("/usr/local/bin/silk/encoder", pcmFile.Name(), silkFilename,
+			"-tencent",
+			"-Fs_API", strconv.Itoa(targetRate),
+			"-rate", strconv.Itoa(targetRate*2),
+		)
 		if err = cmd.Run(); err != nil {
 			err = fmt.Errorf("decoder转换pcm文件到silk文件错误: %w", err)
 			return
@@ -1010,6 +1011,48 @@ func (r *Robot) MsgSendVoice(toWxID string, voice []byte, voiceExt string) (voic
 	return
 }
 
+func (r *Robot) sendFileAppMessage(toWxID, filename, fileMD5 string, totalLen int64, resp *SendFileMessageResponse) (*SendAppResponse, error) {
+	var fileXml FileMessageXml
+	fileXml.Appmsg.AppID = ""
+	fileXml.Appmsg.SDKVer = 0
+	fileXml.Appmsg.Title = filename
+	fileXml.Appmsg.Type = 6
+	fileXml.Appmsg.ShowType = 0
+	fileXml.Appmsg.SoundType = 0
+	fileXml.Appmsg.ContentAttr = 0
+	fileXml.Appmsg.MD5 = fileMD5
+	if resp.AppId != nil {
+		fileXml.Appmsg.AppID = *resp.AppId
+	}
+
+	appAttach := AppAttach{}
+	if resp.MediaId != nil {
+		appAttach.AttachID = *resp.MediaId
+	}
+	appAttach.FileExt = strings.TrimPrefix(filepath.Ext(filename), ".")
+	appAttach.TotalLen = totalLen
+	fileXml.Appmsg.Attach = appAttach
+
+	xmlBytes, err := xml.Marshal(fileXml.Appmsg)
+	if err != nil {
+		return nil, err
+	}
+
+	appMessage, err := r.Client.SendApp(SendAppRequest{
+		Wxid:   r.WxID,
+		ToWxid: toWxID,
+		Xml:    string(xmlBytes),
+		Type:   6,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	messageContentBytes, _ := xml.Marshal(fileXml)
+	appMessage.Content = string(messageContentBytes)
+	return &appMessage, nil
+}
+
 func (r *Robot) MsgSendFile(req SendFileMessageRequest, file io.Reader, fileHeader *multipart.FileHeader) (*SendAppResponse, error) {
 	// 1. 上传文件
 	req.Wxid = r.WxID
@@ -1024,51 +1067,85 @@ func (r *Robot) MsgSendFile(req SendFileMessageRequest, file io.Reader, fileHead
 		return nil, nil
 	}
 	// 2. 发送文件消息
-	var fileXml FileMessageXml
-	fileXml.Appmsg.AppID = ""
-	fileXml.Appmsg.SDKVer = 0
-	fileXml.Appmsg.Title = req.Filename
-	fileXml.Appmsg.Type = 6
-	fileXml.Appmsg.ShowType = 0
-	fileXml.Appmsg.SoundType = 0
-	fileXml.Appmsg.ContentAttr = 0
-	fileXml.Appmsg.MD5 = req.FileMD5
-	if resp.AppId != nil {
-		fileXml.Appmsg.AppID = *resp.AppId
-	}
+	return r.sendFileAppMessage(req.ToWxid, req.Filename, req.FileMD5, req.TotalLen, resp)
+}
 
-	appAttach := AppAttach{}
-	if resp.MediaId != nil {
-		appAttach.AttachID = *resp.MediaId
-	}
-	appAttach.FileExt = strings.TrimPrefix(filepath.Ext(req.Filename), ".")
-	appAttach.TotalLen = req.TotalLen
-	fileXml.Appmsg.Attach = appAttach
-
-	xmlBytes, err := xml.Marshal(fileXml.Appmsg)
+func (r *Robot) MsgSendFileFromLocal(toWxID, tempFilePath string) (*SendAppResponse, error) {
+	// 打开文件
+	file, err := os.Open(tempFilePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
-	xmlStr := string(xmlBytes)
+	defer file.Close()
 
-	appMessage, err := r.Client.SendApp(SendAppRequest{
-		Wxid:   r.WxID,
-		ToWxid: req.ToWxid,
-		Xml:    xmlStr,
-		Type:   6,
-	})
+	// 获取文件信息
+	fileInfo, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取文件信息失败: %w", err)
+	}
+	totalLen := fileInfo.Size()
+	filename := filepath.Base(tempFilePath)
+
+	// 计算 MD5
+	hasher := md5.New()
+	if _, err = io.Copy(hasher, file); err != nil {
+		return nil, fmt.Errorf("计算MD5失败: %w", err)
+	}
+	fileMD5 := hex.EncodeToString(hasher.Sum(nil))
+
+	// 生成 ClientAppDataId
+	clientAppDataId := fmt.Sprintf("%v_%v", r.WxID, time.Now().UnixNano())
+
+	// 分片上传
+	const chunkSize = int64(200 * 1000) // 200 KB
+	totalChunks := (totalLen + chunkSize - 1) / chunkSize
+
+	var resp *SendFileMessageResponse
+	for startPos := int64(0); startPos < totalLen; startPos += chunkSize {
+		currentChunkSize := chunkSize
+		if startPos+currentChunkSize > totalLen {
+			currentChunkSize = totalLen - startPos
+		}
+
+		chunkData := make([]byte, currentChunkSize)
+		n, err := file.ReadAt(chunkData, startPos)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("读取文件分片失败: %w", err)
+		}
+
+		chunkReader := bytes.NewReader(chunkData[:n])
+		fileHeader := &multipart.FileHeader{
+			Filename: filename,
+			Size:     int64(n),
+		}
+
+		resp, err = r.Client.ToolsSendFile(SendFileMessageRequest{
+			Wxid:            r.WxID,
+			ToWxid:          toWxID,
+			ClientAppDataId: clientAppDataId,
+			Filename:        filename,
+			FileMD5:         fileMD5,
+			TotalLen:        totalLen,
+			StartPos:        startPos,
+			TotalChunks:     totalChunks,
+		}, chunkReader, fileHeader)
+		if err != nil {
+			return nil, fmt.Errorf("上传文件分片失败: %w", err)
+		}
 	}
 
-	messageContentBytes, _ := xml.Marshal(fileXml)
-	appMessage.Content = string(messageContentBytes)
-	return &appMessage, nil
+	if resp == nil {
+		return nil, nil
+	}
+	if resp.CreateTime == nil {
+		return nil, nil
+	}
+	return r.sendFileAppMessage(toWxID, filename, fileMD5, totalLen, resp)
 }
 
 func (r *Robot) SendMusicMessage(toWxID string, songInfo SongInfo) (appMessage SendAppResponse, err error) {
 	musicXmlPath := filepath.Join("xml", "music.xml")
-	xmlTemplate, err := XmlFolder.ReadFile(musicXmlPath)
+	xmlTemplate, err := robotXMLTemplate.FS.ReadFile(musicXmlPath)
 	if err != nil {
 		err = fmt.Errorf("读取音乐XML模板失败: %w", err)
 		return
@@ -1173,6 +1250,7 @@ func (r *Robot) LoginYPayVerificationcode(req VerificationCodeRequest) error {
 	return r.Client.LoginYPayVerificationcode(req)
 }
 
+// LoginData62Login Data62 登录
 func (r *Robot) LoginData62Login(username, password string) (UnifyAuthResponse, error) {
 	var data62 string
 	if r.WxID != "" {
@@ -1190,14 +1268,17 @@ func (r *Robot) LoginData62Login(username, password string) (UnifyAuthResponse, 
 	})
 }
 
+// LoginData62SMSAgain Data62 重新发送短信
 func (r *Robot) LoginData62SMSAgain(req LoginData62SMSAgainRequest) (string, error) {
 	return r.Client.LoginData62SMSAgain(req)
 }
 
+// LoginData62SMSVerify Data62 验证短信验证码
 func (r *Robot) LoginData62SMSVerify(req LoginData62SMSVerifyRequest) (string, error) {
 	return r.Client.LoginData62SMSVerify(req)
 }
 
+// LoginA16Data A16 登录
 func (r *Robot) LoginA16Data(username, password string) (UnifyAuthResponse, error) {
 	var a16 string
 	if r.WxID == "" {

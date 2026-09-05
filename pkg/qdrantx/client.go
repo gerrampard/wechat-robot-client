@@ -10,12 +10,9 @@ import (
 )
 
 const (
-	CollectionMessages       = "messages"
 	CollectionMemories       = "memories"
 	CollectionKnowledge      = "knowledge"
 	CollectionImageKnowledge = "image_knowledge"
-	// text-embedding-3-small 默认维度
-	DefaultEmbeddingDimension = 1536
 )
 
 // QdrantClient 封装 Qdrant 客户端
@@ -37,11 +34,11 @@ func NewQdrantClient(host string, port int, apiKey string) (*QdrantClient, error
 	return &QdrantClient{client: client}, nil
 }
 
-// InitCollections 初始化文本相关集合（messages, memories, knowledge）
+// InitCollections 初始化文本相关集合（memories, knowledge）
 func (q *QdrantClient) InitCollections(ctx context.Context, dimension uint64) error {
-	collections := []string{CollectionMessages, CollectionMemories, CollectionKnowledge}
-	for _, name := range collections {
-		if err := q.InitCollection(ctx, name, dimension); err != nil {
+	collections := []string{CollectionMemories, CollectionKnowledge}
+	for _, collectionName := range collections {
+		if err := q.InitCollection(ctx, collectionName, dimension); err != nil {
 			return err
 		}
 	}
@@ -76,8 +73,7 @@ func (q *QdrantClient) InitCollection(ctx context.Context, name string, dimensio
 
 func (q *QdrantClient) createPayloadIndexes(ctx context.Context, collection string) error {
 	indexes := map[string][]string{
-		CollectionMessages:       {"robot_code", "contact_wxid", "chat_room_id", "sender_wxid"},
-		CollectionMemories:       {"robot_code", "contact_wxid", "type"},
+		CollectionMemories:       {"robot_code", "scope", "contact_wxid", "chat_room_id", "category"},
 		CollectionKnowledge:      {"robot_code", "category", "title"},
 		CollectionImageKnowledge: {"robot_code", "category", "title"},
 	}
@@ -139,6 +135,22 @@ func (q *QdrantClient) Search(ctx context.Context, collection string, vector []f
 		return nil, fmt.Errorf("search %s: %w", collection, err)
 	}
 	return results, nil
+}
+
+// DeleteCollection 删除集合（集合不存在时静默忽略）
+func (q *QdrantClient) DeleteCollection(ctx context.Context, name string) error {
+	exists, err := q.client.CollectionExists(ctx, name)
+	if err != nil {
+		return fmt.Errorf("check collection %s: %w", name, err)
+	}
+	if !exists {
+		return nil
+	}
+	if err := q.client.DeleteCollection(ctx, name); err != nil {
+		return fmt.Errorf("delete collection %s: %w", name, err)
+	}
+	log.Printf("[Qdrant] 删除集合 %s 成功", name)
+	return nil
 }
 
 // DeleteByIDs 根据 ID 列表删除向量点

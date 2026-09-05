@@ -42,6 +42,8 @@ func loadEnvConfig() {
 	vars.MysqlSettings.Port = os.Getenv("MYSQL_PORT")
 	vars.MysqlSettings.User = os.Getenv("MYSQL_USER")
 	vars.MysqlSettings.Password = os.Getenv("MYSQL_PASSWORD")
+	vars.MysqlSettings.PrivateUser = os.Getenv("MYSQL_USER_PRIVATE")
+	vars.MysqlSettings.PrivatePassword = os.Getenv("MYSQL_PASSWORD_PRIVATE")
 	// 机器人ID就是数据库名
 	vars.MysqlSettings.Db = os.Getenv("ROBOT_CODE")
 	vars.MysqlSettings.AdminDb = os.Getenv("MYSQL_ADMIN_DB")
@@ -103,6 +105,9 @@ func loadEnvConfig() {
 	}
 
 	vars.ThirdPartyApiKey = os.Getenv("THIRD_PARTY_API_KEY")
+
+	vars.SliderAccessKey = os.Getenv("SLIDER_ACCESS_KEY")
+
 	// 词云
 	vars.WordCloudUrl = os.Getenv("WORD_CLOUD_URL")
 	// pprof 代理地址

@@ -8,6 +8,54 @@
 
 请遵守相关法律法规，合法合规使用本项目。
 
+## 特别说明
+
+**最近 VX 风控升级了，在线站点仅供预览，不要扫码登录，扫了也大概率登录不了，请使用本地部署方案。**
+
+**本地部署该如何部署，请看下方的在线文档，在已经安装了 Docker Git 的情况下，十分钟部署成功，部署前务必仔细阅读在线文档。**
+
+## 在线文档
+
+[https://wechat-doc.houhoukang.com/](https://wechat-doc.houhoukang.com/)
+
+## Pro 版本已经上线
+
+### 新特性
+
+- 支持设置大模型的推理强度: low high max 等等
+
+- 内置搜索文件 / 写入、编辑文件 工具
+
+- 开放发送远程文件接口
+
+- MCP 工具、Skills 工具、内置工具支持按群/好友启用/禁用，支持设置工具是否要开启审核，支持给工具批量设置权限
+
+- 支持设置定时任务，在制定的群/好友开启定时任务，支持定时发送固定文本/图片艾特指定的人/所有人，支持定时触发大模型
+
+- 人设管理支持批量设置人设
+
+- 机器人出租模式，支持按群开启订阅模式
+
+- 优化群聊总结图片样式
+
+- 优化群聊排行榜交互，由发送文本改为发送图片
+
+- 优化早安设置，早安图片支持自定义
+
+- 优化下载文件可能导致文件损坏的问题
+
+- 新增了几个内置 Skills，支持总结 PDF Excel Word
+
+- 支持群聊消息监控，监控到特定的关键字后艾特指定的人、转发到指定的人
+
+- 重构了记忆模块，优化记忆准确性、优化群成员关系建模，能描述更复杂的群成员关系
+
+- 群里机器人支持仅管理员能触发，需要先在群聊`查看群成员`那里将指定群成员设置为管理员
+
+- 修复了协议频繁掉线的问题
+
+- 支持子智能体编排
+
 ## 官方交流群
 
 <table>
@@ -20,7 +68,7 @@
   <tbody>
     <tr>
       <td>
-        <img src="https://img.houhoukang.com/char-room-qrcode.jpg?v=20260322" alt="官方交流群" width="300" height="300">
+        <img src="https://img.houhoukang.com/char-room-qrcode.jpg?v=20260905" alt="官方交流群" width="300" height="300">
       </td>
       <td>
         <img src="https://img.houhoukang.com/weChat-robot-pay.jpg" alt="赞赏码" width="300" height="300">
@@ -50,9 +98,14 @@
 
   - MCP 服务: [https://github.com/hp0912/wechat-robot-mcp-server](https://github.com/hp0912/wechat-robot-mcp-server) 官方内置 MCP 服务
 
+  - Skills: [https://git.houhoukang.com/houhou/wechat-robot-skills](https://git.houhoukang.com/houhou/wechat-robot-skills) 官方 Skills 仓库
+
   - UUID生成器: registry.cn-shenzhen.aliyuncs.com/houhou/wechat-uuid:latest
 
   - Mac 扫码登录自动过滑块: registry.cn-shenzhen.aliyuncs.com/houhou/wechat-slider:latest
+
+- 插件
+  - koishi 适配器: https://github.com/2212018862/koishi-plugin-adapter-wechat-robot.git (进阶玩法，请自行按照插件说明食用)
 
 > 机器人服务端采用iPad协议，可以去马老板开的动物园淘一淘
 

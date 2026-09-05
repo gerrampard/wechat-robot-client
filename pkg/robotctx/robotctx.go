@@ -4,15 +4,20 @@ import "fmt"
 
 // RobotContext 在工具调用入参中透传的机器人上下文
 type RobotContext struct {
-	WeChatClientPort string
-	RobotID          int64
-	RobotCode        string
-	RobotRedisDB     uint
-	RobotWxID        string
-	FromWxID         string
-	SenderWxID       string
-	MessageID        int64
-	RefMessageID     int64
+	WeChatClientPort   string
+	RobotID            int64
+	RobotCode          string
+	DBHost             string
+	DBPort             string
+	DBUser             string
+	DBPassword         string
+	RobotRedisDB       uint
+	RobotWxID          string
+	FromWxID           string
+	SenderWxID         string
+	MessageID          int64
+	RefMessageID       int64
+	KnowledgeBaseCodes []string
 }
 
 // ToEnvVars 将 RobotContext 转换为环境变量键值对
@@ -21,6 +26,10 @@ func (rc RobotContext) ToEnvVars() []string {
 		"ROBOT_WECHAT_CLIENT_PORT=" + rc.WeChatClientPort,
 		fmt.Sprintf("ROBOT_ID=%d", rc.RobotID),
 		"ROBOT_CODE=" + rc.RobotCode,
+		"MYSQL_HOST=" + rc.DBHost,
+		"MYSQL_PORT=" + rc.DBPort,
+		"MYSQL_USER=" + rc.DBUser,
+		"MYSQL_PASSWORD=" + rc.DBPassword,
 		fmt.Sprintf("ROBOT_REDIS_DB=%d", rc.RobotRedisDB),
 		"ROBOT_WX_ID=" + rc.RobotWxID,
 		"ROBOT_FROM_WX_ID=" + rc.FromWxID,

@@ -55,6 +55,15 @@ func (m *Message) GetByContactID(req dto.ChatHistoryRequest, pager appx.Pager) (
 	if req.Keyword != "" {
 		baseCountQuery = baseCountQuery.Where("content LIKE ?", "%"+req.Keyword+"%")
 	}
+	if req.ChatRoomMember != "" {
+		baseCountQuery = baseCountQuery.Where("sender_wxid = ?", req.ChatRoomMember)
+	}
+	if req.TimeStart > 0 {
+		baseCountQuery = baseCountQuery.Where("created_at >= ?", req.TimeStart)
+	}
+	if req.TimeEnd > 0 {
+		baseCountQuery = baseCountQuery.Where("created_at <= ?", req.TimeEnd)
+	}
 	if err := baseCountQuery.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
@@ -72,6 +81,15 @@ func (m *Message) GetByContactID(req dto.ChatHistoryRequest, pager appx.Pager) (
 	fetchQuery = fetchQuery.Where("from_wxid = ?", req.ContactID)
 	if req.Keyword != "" {
 		fetchQuery = fetchQuery.Where("content LIKE ?", "%"+req.Keyword+"%")
+	}
+	if req.ChatRoomMember != "" {
+		fetchQuery = fetchQuery.Where("sender_wxid = ?", req.ChatRoomMember)
+	}
+	if req.TimeStart > 0 {
+		fetchQuery = fetchQuery.Where("created_at >= ?", req.TimeStart)
+	}
+	if req.TimeEnd > 0 {
+		fetchQuery = fetchQuery.Where("created_at <= ?", req.TimeEnd)
 	}
 
 	if err := fetchQuery.Order("id DESC").Offset(pager.OffSet).Limit(pager.PageSize).Find(&messages).Error; err != nil {
@@ -300,6 +318,23 @@ func (m *Message) GetMessagesByRange(firstMsgID, lastMsgID int64, limit int, sen
 	return messages, err
 }
 
+// GetMessagesByRangeInChatRoom 获取指定群聊中指定 ID 范围内的文本消息
+// 精确按 from_wxid (群ID) 过滤，避免跨群/跨私聊混入
+func (m *Message) GetMessagesByRangeInChatRoom(chatRoomID string, firstMsgID, lastMsgID int64, limit int, senderWxIDs ...string) ([]*model.Message, error) {
+	var messages []*model.Message
+	query := m.DB.WithContext(m.Ctx).
+		Where("id >= ? AND id <= ?", firstMsgID, lastMsgID).
+		Where("`type` = 1").
+		Where("from_wxid = ?", chatRoomID)
+	if len(senderWxIDs) > 0 {
+		query = query.Where("sender_wxid IN ?", senderWxIDs)
+	}
+	err := query.Order("id ASC").
+		Limit(limit).
+		Find(&messages).Error
+	return messages, err
+}
+
 // GetChatRoomTextMessagesByTimeRange 获取群聊指定时间范围内的纯文本消息（type=1），排除机器人自身的消息
 func (m *Message) GetChatRoomTextMessagesByTimeRange(chatRoomID, selfWxID string, startTime, endTime int64, limit int) ([]*dto.TextMessageItem, error) {
 	var messages []*dto.TextMessageItem
@@ -333,6 +368,7 @@ func (m *Message) GetRecentChatRoomMessages(chatRoomID string, excludeWxIDs []st
 		Joins("LEFT JOIN chat_room_members ON chat_room_members.wechat_id = messages.sender_wxid AND chat_room_members.chat_room_id = messages.from_wxid").
 		Where("messages.from_wxid = ?", chatRoomID).
 		Where("messages.`type` = 1").
+		Where("messages.`is_ai_context` = 0").
 		Where("messages.content != ''").
 		Where("messages.created_at >= ?", fifteenMinutesAgo)
 	if len(excludeWxIDs) > 0 {
@@ -356,5 +392,40 @@ func (m *Message) GetRecentTextMessages(sinceID int64, limit int) ([]*model.Mess
 		Order("id ASC").
 		Limit(limit).
 		Find(&messages).Error
+	return messages, err
+}
+
+func (m *Message) GetFriendTextMessagesInIDRange(contactWxID string, startMsgID, endMsgID int64, limit int) ([]*model.Message, error) {
+	var messages []*model.Message
+	query := m.DB.WithContext(m.Ctx).
+		Where("from_wxid = ?", contactWxID).
+		Where("id >= ? AND id <= ?", startMsgID, endMsgID).
+		Where("`type` = 1 AND content != ''").
+		Order("id ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	err := query.Find(&messages).Error
+	return messages, err
+}
+
+func (m *Message) GetChatRoomTextMessagesInIDRange(chatRoomID string, startMsgID, endMsgID int64, limit int) ([]*model.Message, error) {
+	return m.GetChatRoomTextMessagesInIDRangeExcludeSenders(chatRoomID, startMsgID, endMsgID, nil, limit)
+}
+
+func (m *Message) GetChatRoomTextMessagesInIDRangeExcludeSenders(chatRoomID string, startMsgID, endMsgID int64, excludeWxIDs []string, limit int) ([]*model.Message, error) {
+	var messages []*model.Message
+	query := m.DB.WithContext(m.Ctx).
+		Where("from_wxid = ?", chatRoomID).
+		Where("id >= ? AND id <= ?", startMsgID, endMsgID).
+		Where("`type` = 1 AND content != ''").
+		Order("id ASC")
+	if len(excludeWxIDs) > 0 {
+		query = query.Where("sender_wxid NOT IN ?", excludeWxIDs)
+	}
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	err := query.Find(&messages).Error
 	return messages, err
 }

@@ -24,10 +24,21 @@ type SendLongTextMessageRequest struct {
 	Content string `form:"content" json:"content" binding:"required"`
 }
 
+type SendGroupMassMsgTextRequest struct {
+	ToWxIDs []string `form:"to_wxids" json:"to_wxids" binding:"required"`
+	Content string   `form:"content" json:"content" binding:"required"`
+}
+
 type SendAppMessageRequest struct {
 	SendMessageCommonRequest
 	Type int    `form:"type" json:"type" binding:"required"`
 	XML  string `form:"xml" json:"xml" binding:"required"`
+}
+
+type SendEmojiMessageRequest struct {
+	SendMessageCommonRequest
+	Md5      string `form:"Md5" json:"Md5" binding:"required"`
+	TotalLen int32  `form:"TotalLen" json:"TotalLen" binding:"required"`
 }
 
 type SendMusicMessageRequest struct {
